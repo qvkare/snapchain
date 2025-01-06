@@ -349,6 +349,59 @@ impl ShardEngine {
         result
     }
 
+    fn txn_summary(txn: &Transaction) -> String {
+        let mut summary = String::new();
+        let fid = format!("fid: {}\n", txn.fid);
+        summary += fid.as_str();
+        for message in &txn.user_messages {
+            let msg_type = message.msg_type().as_str_name();
+            let message_summary = format!(
+                "message_type: {}, msg_hash: {}\n",
+                hex::encode(&message.hash),
+                msg_type
+            );
+            summary += message_summary.as_str()
+        }
+
+        for message in &txn.system_messages {
+            let onchain_event_summary = match &message.on_chain_event {
+                Some(onchain_event) => {
+                    format!(
+                        "message_type: onchain_event, type: {}, tx_hash: {}, log_index: {}\n",
+                        onchain_event.r#type().as_str_name(),
+                        hex::encode(&onchain_event.transaction_hash),
+                        onchain_event.log_index
+                    )
+                }
+                None => "".to_string(),
+            };
+            summary += onchain_event_summary.as_str();
+
+            let fname_transfer_summary =
+                match &message.fname_transfer {
+                    Some(fname_transfer) => {
+                        format!(
+                        "message_type: fname_transfer, from_fid: {}, to_fid: {}, username: {:#?}",
+                        fname_transfer.from_fid,
+                        fname_transfer.id,
+                        fname_transfer.proof.as_ref().map(|proof| proof.name.clone())
+                    )
+                    }
+                    None => "".to_string(),
+                };
+            summary += fname_transfer_summary.as_str()
+        }
+        summary
+    }
+
+    fn txns_summary(transactions: &[Transaction]) -> String {
+        let mut summary = String::new();
+        for snapchain_txn in transactions {
+            summary += Self::txn_summary(snapchain_txn).as_str()
+        }
+        summary
+    }
+
     fn replay_proposal(
         &mut self,
         trie_ctx: &merkle_trie::Context,
@@ -358,6 +411,29 @@ impl ShardEngine {
         source: String,
     ) -> Result<Vec<HubEvent>, EngineError> {
         let mut events = vec![];
+        // Validate that the trie is in a good place to start with
+        match self.get_last_shard_chunk() {
+            None => { // There are places where it's hard to provide a parent hash-- e.g. tests so make this an option and skip validation if not present
+            }
+            Some(shard_chunk) => match self.stores.trie.root_hash() {
+                Err(err) => {
+                    warn!(source, "Unable to compute trie root hash {:#?}", err)
+                }
+                Ok(root_hash) => {
+                    let parent_shard_root = shard_chunk.header.unwrap().shard_root;
+                    if root_hash != parent_shard_root {
+                        warn!(
+                            shard_id = self.shard_id,
+                            our_shard_root = hex::encode(&root_hash),
+                            parent_shard_root = hex::encode(parent_shard_root),
+                            source,
+                            "Parent shard root mismatch"
+                        );
+                    }
+                }
+            },
+        }
+
         for snapchain_txn in transactions {
             let (account_root, txn_events, _) =
                 self.replay_snapchain_txn(trie_ctx, snapchain_txn, txn_batch, source.clone())?;
@@ -367,6 +443,8 @@ impl ShardEngine {
                     fid = snapchain_txn.fid,
                     new_account_root = hex::encode(&account_root),
                     tx_account_root = hex::encode(&snapchain_txn.account_root),
+                    source,
+                    summary = Self::txn_summary(snapchain_txn),
                     "Account root mismatch"
                 );
                 return Err(EngineError::HashMismatch);
@@ -375,12 +453,13 @@ impl ShardEngine {
         }
 
         let root1 = self.stores.trie.root_hash()?;
-
         if &root1 != shard_root {
             warn!(
                 shard_id = self.shard_id,
                 new_shard_root = hex::encode(&root1),
                 tx_shard_root = hex::encode(shard_root),
+                source,
+                summary = Self::txns_summary(transactions),
                 "Shard root mismatch"
             );
             return Err(EngineError::HashMismatch);
