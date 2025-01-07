@@ -2,6 +2,7 @@ use super::account::{IntoU8, OnchainEventStorageError, UserDataStore};
 use crate::core::error::HubError;
 use crate::core::types::Height;
 use crate::core::validations;
+use crate::proto::FarcasterNetwork;
 use crate::proto::HubEvent;
 use crate::proto::Message;
 use crate::proto::UserNameProof;
@@ -530,11 +531,17 @@ impl ShardEngine {
                         "Fname transfer has no proof"
                     );
                 }
-                let proof = fname_transfer.proof.as_ref().unwrap();
-                // TODO: Verify the EIP-712 server signature
+
+                match validations::validate_fname_transfer(fname_transfer) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!("Error validating fname transfer: {:?}", err);
+                    }
+                }
+
                 let event = UserDataStore::merge_username_proof(
                     &self.stores.user_data_store,
-                    proof,
+                    fname_transfer.proof.as_ref().unwrap(),
                     txn_batch,
                 );
                 match event {
@@ -909,6 +916,11 @@ impl ShardEngine {
             .ok_or(MessageValidationError::NoMessageData)?;
 
         // TODO(aditi): Check network
+        let network = FarcasterNetwork::try_from(message_data.network).or_else(|_| {
+            Err(MessageValidationError::MessageValidationError(
+                validations::ValidationError::InvalidData,
+            ))
+        })?;
 
         validations::validate_message(message)?;
 
@@ -935,8 +947,13 @@ impl ShardEngine {
             Some(proto::message_data::Body::UsernameProofBody(_)) => {
                 // Validate ens
             }
-            Some(proto::message_data::Body::VerificationAddAddressBody(__add)) => {
-                // Validate verification
+            Some(proto::message_data::Body::VerificationAddAddressBody(add)) => {
+                let result = validations::validate_add_address(add, message_data.fid, network);
+                if result.is_err() {
+                    return Err(MessageValidationError::MessageValidationError(
+                        result.unwrap_err(),
+                    ));
+                }
             }
             Some(proto::message_data::Body::LinkCompactStateBody(_)) => {
                 // Validate link state length

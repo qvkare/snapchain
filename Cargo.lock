@@ -6287,14 +6287,17 @@ name = "snapchain"
 version = "0.1.0"
 dependencies = [
  "alloy-contract",
+ "alloy-dyn-abi",
  "alloy-primitives",
  "alloy-provider",
+ "alloy-rlp",
  "alloy-rpc-types",
  "alloy-sol-types",
  "alloy-transport",
  "alloy-transport-http",
  "async-trait",
  "blake3",
+ "bs58",
  "cadence",
  "chrono",
  "clap",
