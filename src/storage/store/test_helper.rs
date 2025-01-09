@@ -1,3 +1,4 @@
+use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::storage::db;
 use crate::storage::store::engine::ShardEngine;
 use crate::storage::store::stores::StoreLimits;
@@ -7,6 +8,7 @@ use ed25519_dalek::{SecretKey, SigningKey};
 use prost::Message;
 use std::sync::Arc;
 use tempfile;
+use tokio::sync::mpsc;
 
 use crate::core::error::HubError;
 use crate::proto;
@@ -92,6 +94,7 @@ pub mod limits {
 pub struct EngineOptions {
     pub limits: Option<StoreLimits>,
     pub db_name: Option<String>,
+    pub messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
 }
 
 pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile::TempDir) {
@@ -120,6 +123,7 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
             test_limits,
             statsd_client,
             256,
+            options.messages_request_tx,
         ),
         dir,
     )
@@ -130,6 +134,7 @@ pub fn new_engine() -> (ShardEngine, tempfile::TempDir) {
     new_engine_with_options(EngineOptions {
         limits: None,
         db_name: None,
+        messages_request_tx: None,
     })
 }
 

@@ -2,6 +2,7 @@ use super::account::{IntoU8, OnchainEventStorageError, UserDataStore};
 use crate::core::error::HubError;
 use crate::core::types::Height;
 use crate::core::validations;
+use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::FarcasterNetwork;
 use crate::proto::HubEvent;
 use crate::proto::Message;
@@ -20,10 +21,11 @@ use merkle_trie::TrieKey;
 use std::collections::HashSet;
 use std::str;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::oneshot;
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::sleep;
+use tokio::time::timeout;
 use tracing::{error, info, warn};
 
 #[derive(Error, Debug)]
@@ -47,7 +49,7 @@ pub enum EngineError {
     UsageCountError,
 
     #[error("message receive error")]
-    MessageReceiveError(#[from] mpsc::error::TryRecvError),
+    MessageReceiveError(#[from] oneshot::error::RecvError),
 
     #[error(transparent)]
     MergeOnchainEventError(#[from] OnchainEventStorageError),
@@ -92,7 +94,7 @@ impl EngineError {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum MempoolMessage {
     UserMessage(proto::Message),
     ValidatorMessage(proto::ValidatorMessage),
@@ -117,17 +119,13 @@ pub struct ShardStateChange {
 
 #[derive(Clone)]
 pub struct Senders {
-    pub messages_tx: mpsc::Sender<MempoolMessage>,
     pub events_tx: broadcast::Sender<HubEvent>,
 }
 
 impl Senders {
-    pub fn new(messages_tx: mpsc::Sender<MempoolMessage>) -> Senders {
+    pub fn new() -> Senders {
         let (events_tx, _events_rx) = broadcast::channel::<HubEvent>(100);
-        Senders {
-            events_tx,
-            messages_tx,
-        }
+        Senders { events_tx }
     }
 }
 
@@ -142,9 +140,9 @@ pub struct ShardEngine {
     pub db: Arc<RocksDB>,
     senders: Senders,
     stores: Stores,
-    messages_rx: mpsc::Receiver<MempoolMessage>,
     statsd_client: StatsdClientWrapper,
     max_messages_per_block: u32,
+    messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
 }
 
 impl ShardEngine {
@@ -155,22 +153,18 @@ impl ShardEngine {
         store_limits: StoreLimits,
         statsd_client: StatsdClientWrapper,
         max_messages_per_block: u32,
+        messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
     ) -> ShardEngine {
         // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
-        let (messages_tx, messages_rx) = mpsc::channel::<MempoolMessage>(100);
         ShardEngine {
             shard_id,
             stores: Stores::new(db.clone(), trie, store_limits),
-            senders: Senders::new(messages_tx),
-            messages_rx,
+            senders: Senders::new(),
             db,
             statsd_client,
             max_messages_per_block,
+            messages_request_tx,
         }
-    }
-
-    pub fn messages_tx(&self) -> mpsc::Sender<MempoolMessage> {
-        self.senders.messages_tx.clone()
     }
 
     // statsd
@@ -203,30 +197,37 @@ impl ShardEngine {
         &mut self,
         max_wait: Duration,
     ) -> Result<Vec<MempoolMessage>, EngineError> {
-        let mut messages = Vec::new();
-        let start_time = Instant::now();
+        if let Some(messages_request_tx) = &self.messages_request_tx {
+            let (message_tx, message_rx) = oneshot::channel();
 
-        loop {
-            if start_time.elapsed() >= max_wait {
-                break;
+            if let Err(err) = messages_request_tx
+                .send(MempoolMessagesRequest {
+                    shard_id: self.shard_id,
+                    message_tx,
+                    max_messages_per_block: self.max_messages_per_block,
+                })
+                .await
+            {
+                error!(
+                    "Could not send request for messages to mempool {}",
+                    err.to_string()
+                )
             }
 
-            while messages.len() < self.max_messages_per_block as usize {
-                match self.messages_rx.try_recv() {
-                    Ok(msg) => messages.push(msg),
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(err) => return Err(EngineError::from(err)),
+            match timeout(max_wait, message_rx).await {
+                Ok(response) => match response {
+                    Ok(new_messages) => Ok(new_messages),
+                    Err(err) => Err(EngineError::from(err)),
+                },
+                Err(_) => {
+                    error!("Did not receive messages from mempool in time");
+                    // Just proceed with no messages
+                    Ok(vec![])
                 }
             }
-
-            if messages.len() >= self.max_messages_per_block as usize {
-                break;
-            }
-
-            sleep(Duration::from_millis(5)).await;
+        } else {
+            Ok(vec![])
         }
-
-        Ok(messages)
     }
 
     fn prepare_proposal(
