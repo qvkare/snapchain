@@ -9,6 +9,7 @@ use crate::proto::hub_service_server::HubService;
 use crate::proto::on_chain_event::Body;
 use crate::proto::GetInfoResponse;
 use crate::proto::HubEvent;
+use crate::proto::MessageType;
 use crate::proto::TrieNodeMetadataRequest;
 use crate::proto::TrieNodeMetadataResponse;
 use crate::proto::UserNameProof;
@@ -326,6 +327,30 @@ impl MyHubService {
             )),
         }
     }
+
+    fn rewrite_hub_event(mut hub_event: HubEvent) -> HubEvent {
+        match &mut hub_event.body {
+            Some(body) => {
+                match body {
+                    proto::hub_event::Body::MergeMessageBody(merge_message_body) => {
+                        match &merge_message_body.message {
+                            None => {}
+                            Some(message) => {
+                                if message.msg_type() == MessageType::LinkCompactState {
+                                    // In the case of merging compact state, we omit the deleted messages as this would
+                                    // result in an unbounded message size:
+                                    merge_message_body.deleted_messages = vec![]
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None => {}
+        };
+        hub_event
+    }
 }
 
 #[tonic::async_trait]
@@ -560,6 +585,7 @@ impl HubService for MyHubService {
                     .unwrap();
 
                     for event in old_events.events {
+                        let event = Self::rewrite_hub_event(event);
                         if let Err(_) = server_tx.send(Ok(event)).await {
                             return;
                         }
@@ -580,6 +606,7 @@ impl HubService for MyHubService {
                     loop {
                         match event_rx.recv().await {
                             Ok(hub_event) => {
+                                let hub_event = Self::rewrite_hub_event(hub_event);
                                 match tx.send(Ok(hub_event)).await {
                                     Ok(_) => {}
                                     Err(_) => {
