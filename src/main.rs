@@ -164,7 +164,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     tokio::spawn(async move { mempool.run().await });
 
-    let admin_service = MyAdminService::new(db_manager, mempool_tx.clone());
+    let admin_service = MyAdminService::new(
+        db_manager,
+        mempool_tx.clone(),
+        node.shard_stores.clone(),
+        block_store.clone(),
+        app_config.snapshot.clone(),
+        app_config.fc_network,
+    );
 
     if !app_config.fnames.disable {
         let mut fetcher = snapchain::connectors::fname::Fetcher::new(
@@ -229,8 +236,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         shutdown_tx.send(()).await.ok();
     });
 
-    if app_config.backup_dir != "" {
-        let backup_dir = app_config.backup_dir.clone();
+    // TODO(aditi): We may want to reconsider this code when we upload snapshots on a schedule.
+    if app_config.snapshot.backup_on_startup {
         let shard_ids = app_config.consensus.shard_ids.clone();
         let block_db = block_store.db.clone();
         let mut dbs = HashMap::new();
@@ -243,11 +250,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tokio::spawn(async move {
             info!(
                 "Backing up {:?} shard databases to {:?}",
-                shard_ids, backup_dir
+                shard_ids, app_config.snapshot.backup_dir
             );
             let timestamp = chrono::Utc::now().timestamp_millis();
             dbs.iter().for_each(|(shard_id, db)| {
-                RocksDB::backup_db(db.clone(), &backup_dir, *shard_id, timestamp).unwrap();
+                RocksDB::backup_db(
+                    db.clone(),
+                    &app_config.snapshot.backup_dir,
+                    *shard_id,
+                    timestamp,
+                )
+                .unwrap();
             });
         });
     }
