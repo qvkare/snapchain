@@ -1,4 +1,4 @@
-use malachite_metrics::{Metrics, SharedRegistry};
+use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::core::types::proto;
@@ -124,12 +124,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
     let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
 
-    let gossip_result = SnapchainGossip::create(
-        keypair.clone(),
-        app_config.gossip,
-        system_tx.clone(),
-        mempool_tx.clone(),
-    );
+    let gossip_result =
+        SnapchainGossip::create(keypair.clone(), app_config.gossip, system_tx.clone());
 
     if let Err(e) = gossip_result {
         error!(error = ?e, "Failed to create SnapchainGossip");
@@ -137,6 +133,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut gossip = gossip_result?;
+    let local_peer_id = gossip.swarm.local_peer_id().clone();
     let gossip_tx = gossip.tx.clone();
 
     tokio::spawn(async move {
@@ -150,14 +147,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let registry = SharedRegistry::global();
     // Use the new non-global metrics registry when we upgrade to newer version of malachite
     let _ = Metrics::register(registry);
-
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
     let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
     let node = SnapchainNode::create(
         keypair.clone(),
         app_config.consensus.clone(),
-        Some(app_config.rpc_address.clone()),
+        local_peer_id,
         gossip_tx.clone(),
         shard_decision_tx,
         None,
@@ -166,6 +162,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_config.rocksdb_dir.clone(),
         statsd_client.clone(),
         app_config.trie_branching_factor,
+        registry,
     )
     .await;
 
@@ -223,6 +220,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let rpc_shard_senders = node.shard_senders.clone();
 
     let rpc_block_store = block_store.clone();
+    let mempool_tx_for_service = mempool_tx.clone();
     tokio::spawn(async move {
         let l1_client: Option<Box<dyn L1Client>> = match RealL1Client::new(app_config.l1_rpc_url) {
             Ok(client) => Some(Box::new(client)),
@@ -235,7 +233,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             statsd_client.clone(),
             app_config.consensus.num_shards,
             Box::new(routing::ShardRouter {}),
-            mempool_tx.clone(),
+            mempool_tx_for_service,
             l1_client,
         );
 
@@ -339,14 +337,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         gossip_tx.send(GossipEvent::RegisterValidator(register_validator)).await?;
                     }
                     info!("Registering validator with nonce: {}", nonce);
-
                 }
             }
             Some(msg) = system_rx.recv() => {
                 match msg {
-                    SystemMessage::Consensus(consensus_msg) => {
-                        // Forward to apropriate consesnsus actors
-                        node.dispatch(consensus_msg);
+                    SystemMessage::MalachiteNetwork(shard, event) => {
+                        // Forward to appropriate consensus actors
+                        node.dispatch(shard, event);
+                    },
+                    SystemMessage::Mempool(msg) => {
+                        let res = mempool_tx.send(msg).await;
+                        if let Err(e) = res {
+                            warn!("Failed to add to local mempool: {:?}", e);
+                        }
+                    },
+                    SystemMessage::Consensus(_) => {
+                        // Deprecated
                     }
                 }
             }
