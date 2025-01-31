@@ -8,12 +8,15 @@ use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
+use flate2::read::GzDecoder;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::fs::{self};
-use std::io;
+use std::io::{self};
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
+use tar::Archive;
 use thiserror::Error;
-use tracing::info;
+use tokio::io::{AsyncWriteExt, BufWriter};
+use tracing::{error, info};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -21,6 +24,9 @@ pub struct Config {
     pub s3_bucket: String,
     pub backup_dir: String,
     pub backup_on_startup: bool,
+    pub load_db_from_snapshot: bool,
+    pub snapshot_download_url: String,
+    pub snapshot_download_dir: String,
 }
 
 impl Default for Config {
@@ -29,7 +35,11 @@ impl Default for Config {
             endpoint_url: "".to_string(),
             s3_bucket: "snapchain-snapshots".to_string(),
             backup_dir: ".rocks.backup".to_string(),
+            snapshot_download_dir: ".rocks.snapshot".to_string(),
             backup_on_startup: false,
+            load_db_from_snapshot: true,
+            snapshot_download_url: "https://pub-d352dd8819104a778e20d08888c5a661.r2.dev"
+                .to_string(),
         }
     }
 }
@@ -60,8 +70,20 @@ pub enum SnapshotError {
     #[error(transparent)]
     BuildError(#[from] BuildError),
 
+    #[error(transparent)]
+    ReqwestError(#[from] reqwest::Error),
+
+    #[error(transparent)]
+    SerdeJsonError(#[from] serde_json::Error),
+
     #[error("unable to convert time to date")]
     DateError,
+
+    #[error("unable to find parent directory")]
+    MissingParentDirectory,
+
+    #[error("unable to convert file name to string")]
+    UnableToParseFileName,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -145,6 +167,74 @@ fn metadata_path(network: FarcasterNetwork, shard_id: u32) -> String {
     )
 }
 
+pub async fn download_snapshots(
+    network: FarcasterNetwork,
+    snapshot_config: &Config,
+    db_dir: String,
+    shard_id: u32,
+) -> Result<(), SnapshotError> {
+    let snapshot_dir = snapshot_config.snapshot_download_dir.clone();
+    std::fs::create_dir_all(snapshot_dir.clone())?;
+    let metadata_url = format!(
+        "{}/{}",
+        snapshot_config.snapshot_download_url,
+        metadata_path(network, shard_id)
+    );
+    info!("Retrieving metadata from {}", metadata_url);
+    let metadata_json = reqwest::get(metadata_url)
+        .await?
+        .json::<SnapshotMetadata>()
+        .await?;
+    let base_path = metadata_json.key_base;
+    for chunk in metadata_json.chunks {
+        let download_path = format!(
+            "{}/{}/{}",
+            snapshot_config.snapshot_download_url, base_path, chunk
+        );
+        let download_response = reqwest::get(download_path).await?;
+        let mut byte_stream = download_response.bytes_stream();
+        let filename = format!("{}/{}", snapshot_dir.clone(), chunk);
+        info!("Downloading zipped chunk at to {}", filename);
+
+        let mut file = BufWriter::new(tokio::fs::File::create(filename).await?);
+
+        while let Some(piece) = byte_stream.next().await {
+            file.write_all(&piece?).await?;
+        }
+        file.flush().await?;
+    }
+
+    for entry in std::fs::read_dir(snapshot_dir.clone())? {
+        let entry = entry?;
+        info!("Unzipping file {}", entry.path().to_string_lossy());
+        let file = std::fs::File::open(entry.path())?;
+        let gz_decoder = GzDecoder::new(file);
+        let mut archive = Archive::new(gz_decoder);
+        archive.unpack(&db_dir)?;
+
+        // Move contents of subdirectory into parent. The unzipped files are put into a subdirectory
+        for entry in std::fs::read_dir(&db_dir)? {
+            let entry = entry?;
+            if entry.path().is_dir() {
+                for db_file in std::fs::read_dir(entry.path())? {
+                    let db_file = db_file?;
+                    std::fs::rename(
+                        db_file.path(),
+                        db_file
+                            .path()
+                            .parent()
+                            .ok_or(SnapshotError::MissingParentDirectory)?
+                            .join(db_file.file_name()),
+                    )?
+                }
+                std::fs::remove_dir_all(entry.path())?;
+            }
+        }
+    }
+    std::fs::remove_dir_all(snapshot_dir)?;
+    Ok(())
+}
+
 pub async fn upload_to_s3(
     network: FarcasterNetwork,
     chunked_dir_path: String,
@@ -163,11 +253,15 @@ pub async fn upload_to_s3(
         start_date,
         start_timetamp / 1000
     );
-    let files = fs::read_dir(chunked_dir_path)?;
+    let files = std::fs::read_dir(chunked_dir_path)?;
     let mut file_names: Vec<String> = vec![];
     for entry in files {
         let entry = entry?;
-        let file_name = entry.file_name().to_str().unwrap().to_string();
+        let file_name = entry
+            .file_name()
+            .to_str()
+            .ok_or(SnapshotError::UnableToParseFileName)?
+            .to_string();
         let key = format!("{}/{}", upload_dir, file_name);
 
         info!(key, "Uploading chunk to s3");
@@ -197,7 +291,7 @@ pub async fn upload_to_s3(
         timestamp: start_timetamp,
     };
 
-    let metadata_json = serde_json::to_string(&metadata).unwrap();
+    let metadata_json = serde_json::to_string(&metadata)?;
     let metadata_key = metadata_path(network, shard_id);
     let upload_result = s3_client
         .put_object()
