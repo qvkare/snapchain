@@ -14,7 +14,10 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::{
-    core::validations::{self, VerificationAddressClaim},
+    core::validations,
+    core::validations::verification::{
+        validate_verification_contract_signature, VerificationAddressClaim,
+    },
     proto::{
         on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventType,
         SignerEventBody, SignerEventType, SignerMigratedEventBody, StorageRentEventBody,
@@ -118,7 +121,7 @@ pub trait L1Client: Send + Sync {
         &self,
         claim: VerificationAddressClaim,
         body: &VerificationAddAddressBody,
-    ) -> Result<(), validations::ValidationError>;
+    ) -> Result<(), validations::error::ValidationError>;
 }
 
 pub struct RealL1Client {
@@ -148,8 +151,8 @@ impl L1Client for RealL1Client {
         &self,
         claim: VerificationAddressClaim,
         body: &VerificationAddAddressBody,
-    ) -> Result<(), validations::ValidationError> {
-        validations::validate_verification_contract_signature(&self.provider, claim, body).await
+    ) -> Result<(), validations::error::ValidationError> {
+        validate_verification_contract_signature(&self.provider, claim, body).await
     }
 }
 

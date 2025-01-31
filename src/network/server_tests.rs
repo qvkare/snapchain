@@ -8,7 +8,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::connectors::onchain_events::L1Client;
-    use crate::core::validations::{self, VerificationAddressClaim};
+    use crate::core::validations::{self, verification::VerificationAddressClaim};
     use crate::mempool::mempool::Mempool;
     use crate::mempool::routing;
     use crate::mempool::routing::MessageRouter;
@@ -63,7 +63,7 @@ mod tests {
             &self,
             _claim: VerificationAddressClaim,
             _body: &VerificationAddAddressBody,
-        ) -> Result<(), validations::ValidationError> {
+        ) -> Result<(), validations::error::ValidationError> {
             future::ready(Ok(())).await
         }
     }

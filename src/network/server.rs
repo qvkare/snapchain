@@ -2,7 +2,7 @@ use super::rpc_extensions::{AsMessagesResponse, AsSingleMessageResponse};
 use crate::connectors::onchain_events::L1Client;
 use crate::core::error::HubError;
 use crate::core::validations;
-use crate::core::validations::VerificationAddressClaim;
+use crate::core::validations::verification::VerificationAddressClaim;
 use crate::mempool::routing;
 use crate::proto;
 use crate::proto::hub_service_server::HubService;
@@ -139,13 +139,14 @@ impl MyHubService {
                     Some(proto::message_data::Body::VerificationAddAddressBody(body)) => {
                         if body.verification_type == 1 {
                             // todo: thread through network
-                            let claim_result = validations::make_verification_address_claim(
-                                message_data.fid,
-                                &body.address,
-                                proto::FarcasterNetwork::Mainnet,
-                                &body.block_hash,
-                                proto::Protocol::Ethereum,
-                            );
+                            let claim_result =
+                                validations::verification::make_verification_address_claim(
+                                    message_data.fid,
+                                    &body.address,
+                                    proto::FarcasterNetwork::Mainnet,
+                                    &body.block_hash,
+                                    proto::Protocol::Ethereum,
+                                );
                             match claim_result {
                                 Ok(claim) => {
                                     self.validate_contract_signature(claim, body).await?;
