@@ -217,23 +217,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let rpc_shard_senders = node.shard_senders.clone();
 
     let rpc_block_store = block_store.clone();
+    let l1_client: Option<Box<dyn L1Client>> = match RealL1Client::new(app_config.l1_rpc_url) {
+        Ok(client) => Some(Box::new(client)),
+        Err(_) => None,
+    };
     let mempool_tx_for_service = mempool_tx.clone();
+    let service = MyHubService::new(
+        rpc_block_store,
+        rpc_shard_stores,
+        rpc_shard_senders,
+        statsd_client.clone(),
+        app_config.consensus.num_shards,
+        Box::new(routing::ShardRouter {}),
+        mempool_tx_for_service,
+        l1_client,
+    );
     tokio::spawn(async move {
-        let l1_client: Option<Box<dyn L1Client>> = match RealL1Client::new(app_config.l1_rpc_url) {
-            Ok(client) => Some(Box::new(client)),
-            Err(_) => None,
-        };
-        let service = MyHubService::new(
-            rpc_block_store,
-            rpc_shard_stores,
-            rpc_shard_senders,
-            statsd_client.clone(),
-            app_config.consensus.num_shards,
-            Box::new(routing::ShardRouter {}),
-            mempool_tx_for_service,
-            l1_client,
-        );
-
         let resp = Server::builder()
             .add_service(HubServiceServer::new(service))
             .add_service(AdminServiceServer::new(admin_service))
