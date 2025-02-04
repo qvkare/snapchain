@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
@@ -14,16 +14,19 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::{
-    core::validations,
-    core::validations::verification::{
-        validate_verification_contract_signature, VerificationAddressClaim,
+    core::validations::{
+        self,
+        verification::{validate_verification_contract_signature, VerificationAddressClaim},
     },
     proto::{
-        on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventType,
-        SignerEventBody, SignerEventType, SignerMigratedEventBody, StorageRentEventBody,
-        ValidatorMessage, VerificationAddAddressBody,
+        on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventState,
+        OnChainEventType, SignerEventBody, SignerEventType, SignerMigratedEventBody,
+        StorageRentEventBody, ValidatorMessage, VerificationAddAddressBody,
     },
-    storage::store::engine::MempoolMessage,
+    storage::{
+        db::RocksDB,
+        store::{engine::MempoolMessage, ingest_state},
+    },
     utils::statsd_wrapper::StatsdClientWrapper,
 };
 
@@ -62,7 +65,7 @@ const FIRST_BLOCK: u64 = 108864739;
 pub struct Config {
     pub rpc_url: String,
     pub start_block_number: u64,
-    pub stop_block_number: u64,
+    pub stop_block_number: Option<u64>,
 }
 
 impl Default for Config {
@@ -70,7 +73,7 @@ impl Default for Config {
         return Config {
             rpc_url: String::new(),
             start_block_number: FIRST_BLOCK,
-            stop_block_number: FIRST_BLOCK,
+            stop_block_number: None,
         };
     }
 }
@@ -161,8 +164,9 @@ pub struct Subscriber {
     onchain_events_by_block: HashMap<u32, Vec<OnChainEvent>>,
     mempool_tx: mpsc::Sender<MempoolMessage>,
     start_block_number: u64,
-    stop_block_number: u64,
+    stop_block_number: Option<u64>,
     statsd_client: StatsdClientWrapper,
+    db: Arc<RocksDB>,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -171,6 +175,7 @@ impl Subscriber {
         config: Config,
         mempool_tx: mpsc::Sender<MempoolMessage>,
         statsd_client: StatsdClientWrapper,
+        db: Arc<RocksDB>,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -178,6 +183,7 @@ impl Subscriber {
         let url = config.rpc_url.parse()?;
         let provider = ProviderBuilder::new().on_http(url);
         Ok(Subscriber {
+            db,
             provider,
             onchain_events_by_block: HashMap::new(),
             mempool_tx,
@@ -249,6 +255,25 @@ impl Subscriber {
             }
             Some(events) => events.push(event.clone()),
         }
+        if block_number as u64 > self.latest_block_in_db() {
+            match ingest_state::onchain_events::put_state(
+                &self.db,
+                OnChainEventState {
+                    last_l2_block: block_number as u64,
+                },
+            ) {
+                Err(err) => {
+                    error!(
+                        block_number = event.block_number,
+                        tx_hash = hex::encode(&event.transaction_hash),
+                        log_index = event.log_index,
+                        err = err.to_string(),
+                        "Unable to store last block number",
+                    );
+                }
+                _ => {}
+            }
+        };
         if let Err(err) = self
             .mempool_tx
             .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
@@ -455,11 +480,16 @@ impl Subscriber {
         }
     }
 
-    pub async fn sync_historical_events(&mut self, address: Address) -> Result<(), SubscribeError> {
+    pub async fn sync_historical_events(
+        &mut self,
+        address: Address,
+        initial_start_block: u64,
+        final_stop_block: u64,
+    ) -> Result<(), SubscribeError> {
         let batch_size = 1000;
-        let mut start_block = self.start_block_number;
+        let mut start_block = initial_start_block;
         loop {
-            let stop_block = self.stop_block_number.min(start_block + batch_size);
+            let stop_block = final_stop_block.min(start_block + batch_size);
             let filter = Filter::new()
                 .address(address)
                 .from_block(start_block)
@@ -482,10 +512,10 @@ impl Subscriber {
                 }
             }
             start_block += batch_size;
-            if start_block > self.stop_block_number {
+            if start_block > final_stop_block {
                 info!(
                     start_block,
-                    stop_block = self.stop_block_number,
+                    stop_block = final_stop_block,
                     "Stopping onchain events sync"
                 );
                 return Ok(());
@@ -493,21 +523,82 @@ impl Subscriber {
         }
     }
 
-    pub async fn run(&mut self, sync_live_events: bool) -> Result<(), SubscribeError> {
+    fn latest_block_in_db(&self) -> u64 {
+        match ingest_state::onchain_events::get_state(&self.db) {
+            Ok(state) => match state {
+                None => 0,
+                Some(state) => state.last_l2_block,
+            },
+            Err(err) => {
+                error!(
+                    err = err.to_string(),
+                    "Unable to retrieve last block number",
+                );
+                0
+            }
+        }
+    }
+
+    async fn latest_block_on_chain(&mut self) -> Result<u64, SubscribeError> {
+        let block = self
+            .provider
+            .get_block_by_number(
+                alloy_rpc_types::BlockNumberOrTag::Latest,
+                alloy_rpc_types::BlockTransactionsKind::Hashes,
+            )
+            .await?;
+        Ok(block
+            .ok_or(SubscribeError::LogMissingBlockNumber)?
+            .header
+            .number)
+    }
+
+    pub async fn run(&mut self) -> Result<(), SubscribeError> {
+        let latest_block_on_chain = self.latest_block_on_chain().await?;
+        let latest_block_in_db = self.latest_block_in_db();
         info!(
             start_block_number = self.start_block_number,
             stop_block_numer = self.stop_block_number,
+            latest_block_on_chain,
+            latest_block_in_db,
             "Starting l2 events subscription"
         );
-        self.sync_historical_events(STORAGE_REGISTRY).await?;
-        self.sync_historical_events(ID_REGISTRY).await?;
-        self.sync_historical_events(KEY_REGISTRY).await?;
-        // TODO (aditi): [sync_live_events] should go away. We should automatically do live sync and figure out where to stop historical sync
-        if sync_live_events {
+        let historical_sync_start_block = latest_block_in_db.max(self.start_block_number);
+        let historical_sync_stop_block =
+            latest_block_on_chain.min(self.stop_block_number.unwrap_or(latest_block_on_chain));
+        self.sync_historical_events(
+            STORAGE_REGISTRY,
+            historical_sync_start_block,
+            historical_sync_stop_block,
+        )
+        .await?;
+        self.sync_historical_events(
+            ID_REGISTRY,
+            historical_sync_start_block,
+            historical_sync_stop_block,
+        )
+        .await?;
+        self.sync_historical_events(
+            KEY_REGISTRY,
+            historical_sync_start_block,
+            historical_sync_stop_block,
+        )
+        .await?;
+
+        let should_start_live_sync = match self.stop_block_number {
+            None => true,
+            Some(stop_block) => stop_block > historical_sync_stop_block,
+        };
+
+        if should_start_live_sync {
             // Subscribe to new events starting from now.
             let filter = Filter::new()
                 .address(vec![STORAGE_REGISTRY, KEY_REGISTRY, ID_REGISTRY])
-                .from_block(self.start_block_number);
+                .from_block(historical_sync_stop_block);
+            let filter = match self.stop_block_number {
+                None => filter,
+                Some(stop_block) => filter.to_block(stop_block),
+            };
             let subscription = self.provider.watch_logs(&filter).await?;
             let mut stream = subscription.into_stream();
             while let Some(events) = stream.next().await {
