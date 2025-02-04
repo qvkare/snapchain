@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
@@ -19,14 +19,11 @@ use crate::{
         verification::{validate_verification_contract_signature, VerificationAddressClaim},
     },
     proto::{
-        on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventState,
-        OnChainEventType, SignerEventBody, SignerEventType, SignerMigratedEventBody,
-        StorageRentEventBody, ValidatorMessage, VerificationAddAddressBody,
+        on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventType,
+        SignerEventBody, SignerEventType, SignerMigratedEventBody, StorageRentEventBody,
+        ValidatorMessage, VerificationAddAddressBody,
     },
-    storage::{
-        db::RocksDB,
-        store::{engine::MempoolMessage, ingest_state},
-    },
+    storage::store::{engine::MempoolMessage, node_local_state::LocalStateStore},
     utils::statsd_wrapper::StatsdClientWrapper,
 };
 
@@ -166,7 +163,7 @@ pub struct Subscriber {
     start_block_number: u64,
     stop_block_number: Option<u64>,
     statsd_client: StatsdClientWrapper,
-    db: Arc<RocksDB>,
+    local_state_store: LocalStateStore,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -175,7 +172,7 @@ impl Subscriber {
         config: Config,
         mempool_tx: mpsc::Sender<MempoolMessage>,
         statsd_client: StatsdClientWrapper,
-        db: Arc<RocksDB>,
+        local_state_store: LocalStateStore,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -183,7 +180,7 @@ impl Subscriber {
         let url = config.rpc_url.parse()?;
         let provider = ProviderBuilder::new().on_http(url);
         Ok(Subscriber {
-            db,
+            local_state_store,
             provider,
             onchain_events_by_block: HashMap::new(),
             mempool_tx,
@@ -255,25 +252,6 @@ impl Subscriber {
             }
             Some(events) => events.push(event.clone()),
         }
-        if block_number as u64 > self.latest_block_in_db() {
-            match ingest_state::onchain_events::put_state(
-                &self.db,
-                OnChainEventState {
-                    last_l2_block: block_number as u64,
-                },
-            ) {
-                Err(err) => {
-                    error!(
-                        block_number = event.block_number,
-                        tx_hash = hex::encode(&event.transaction_hash),
-                        log_index = event.log_index,
-                        err = err.to_string(),
-                        "Unable to store last block number",
-                    );
-                }
-                _ => {}
-            }
-        };
         if let Err(err) = self
             .mempool_tx
             .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
@@ -289,6 +267,26 @@ impl Subscriber {
                 err = err.to_string(),
                 "Unable to send onchain event to mempool"
             )
+        }
+    }
+
+    fn record_block_number(&self, event: &Log) {
+        match event.block_number {
+            Some(block_number) => {
+                if block_number as u64 > self.latest_block_in_db() {
+                    match self.local_state_store.set_latest_block_number(block_number) {
+                        Err(err) => {
+                            error!(
+                                block_number,
+                                err = err.to_string(),
+                                "Unable to store last block number",
+                            );
+                        }
+                        _ => {}
+                    }
+                };
+            }
+            None => {}
         }
     }
 
@@ -508,7 +506,10 @@ impl Subscriber {
                             err, event,
                         )
                     }
-                    Ok(_) => {}
+                    Ok(()) => {
+                        // TODO(aditi): Consider recording the block number only after the last event in the batch. Right now, batches are pretty large so we wouldn't be recording frequently enough
+                        self.record_block_number(&event);
+                    }
                 }
             }
             start_block += batch_size;
@@ -524,11 +525,8 @@ impl Subscriber {
     }
 
     fn latest_block_in_db(&self) -> u64 {
-        match ingest_state::onchain_events::get_state(&self.db) {
-            Ok(state) => match state {
-                None => 0,
-                Some(state) => state.last_l2_block,
-            },
+        match self.local_state_store.get_latest_block_number() {
+            Ok(number) => number.unwrap_or(0),
             Err(err) => {
                 error!(
                     err = err.to_string(),
@@ -611,7 +609,9 @@ impl Subscriber {
                                 err, event,
                             )
                         }
-                        Ok(_) => {}
+                        Ok(()) => {
+                            self.record_block_number(&event);
+                        }
                     }
                 }
             }
