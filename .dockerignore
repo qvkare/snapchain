@@ -4,5 +4,6 @@
 /tests
 /target
 /Dockerfile
+/Makefile
 README.md
 /scripts
