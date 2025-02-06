@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -29,6 +32,7 @@ pub struct Config {
     pub queue_size: u32,
     pub allow_unlimited_mempool_size: bool,
     pub capacity_per_shard: u64,
+    pub rx_poll_interval: Duration,
 }
 
 impl Default for Config {
@@ -37,6 +41,7 @@ impl Default for Config {
             queue_size: 500,
             allow_unlimited_mempool_size: false,
             capacity_per_shard: 1024,
+            rx_poll_interval: Duration::from_millis(1),
         }
     }
 }
@@ -286,8 +291,7 @@ impl Mempool {
     }
 
     pub async fn run(&mut self) {
-        // TODO(aditi): We may want to adjust this poll interval
-        let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(1));
+        let mut poll_interval = tokio::time::interval(self.config.rx_poll_interval);
         loop {
             tokio::select! {
                 biased;
@@ -297,15 +301,9 @@ impl Mempool {
                         self.pull_messages(messages_request).await
                     }
                 }
-                _ = poll_interval.tick() => {
-                    if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
-                        if let Ok(message) = self.mempool_rx.try_recv() {
-                            self.insert(message).await;
-                        }
-                    }
-                }
                 chunk = self.shard_decision_rx.recv() => {
-                    if let Ok(chunk) = chunk {
+                    match chunk {
+                        Ok(chunk) => {
                         let header = chunk.header.expect("Expects chunk to have a header");
                         let height = header.height.expect("Expects header to have a height");
                         if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
@@ -318,6 +316,31 @@ impl Mempool {
                                     mempool.remove(&system_message.mempool_key());
                                     self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
                                 }
+                            }
+                        }
+                    },
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("Shard decision tx is closed.");
+                    },
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        error!(lag = count, "Shard decision rx is lagged");
+                    }
+                }
+
+                }
+                _ = poll_interval.tick() => {
+                    // We want to pull in multiple messages per poll so that throughput is not blocked on the polling frequency. The number of messages we pull should be fixed and relatively small so that the mempool isn't always stuck here.
+                    for _ in 0..256 {
+                        if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
+                            match self.mempool_rx.try_recv() {
+                                Ok(message) => {
+                                    self.insert(message).await;
+                                }, Err(mpsc::error::TryRecvError::Disconnected) => {
+                                    panic!("Mempool tx is disconnected")
+                                },
+                                Err(mpsc::error::TryRecvError::Empty) => {
+                                },
+
                             }
                         }
                     }
