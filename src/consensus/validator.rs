@@ -4,6 +4,7 @@ use crate::core::types::{
     SnapchainValidatorSet,
 };
 use crate::proto::{full_proposal, Commits, FullProposal};
+use crate::storage::store::node_local_state::LocalStateStore;
 use informalsystems_malachitebft_core_consensus::ProposedValue;
 use informalsystems_malachitebft_core_types::{Round, ValidatorSet};
 use std::collections::HashSet;
@@ -27,6 +28,7 @@ pub struct ShardValidator {
     shard_proposer: Option<ShardProposer>,
     pub started: bool,
     pub saw_proposal_from_validator: HashSet<Address>,
+    local_state_store: LocalStateStore,
 }
 
 impl ShardValidator {
@@ -36,6 +38,7 @@ impl ShardValidator {
         initial_validator_set: SnapchainValidatorSet,
         block_proposer: Option<BlockProposer>,
         shard_proposer: Option<ShardProposer>,
+        local_state_store: LocalStateStore,
     ) -> ShardValidator {
         ShardValidator {
             shard_id: shard.clone(),
@@ -49,6 +52,7 @@ impl ShardValidator {
             shard_proposer,
             started: false,
             saw_proposal_from_validator: HashSet::new(),
+            local_state_store,
         }
     }
 
@@ -131,6 +135,13 @@ impl ShardValidator {
         } else {
             panic!("No proposer set");
         }
+        // Delete all proposals for this height, this node might have proposed for earlier rounds
+        if let Err(err) = self
+            .local_state_store
+            .delete_proposals(self.shard_id.shard_id(), commits.height.unwrap())
+        {
+            error!("Error deleting proposal {}", err.to_string())
+        }
         self.confirmed_height = commits.height;
         self.current_round = Round::Nil;
     }
@@ -187,12 +198,29 @@ impl ShardValidator {
         round: Round,
         timeout: Duration,
     ) -> FullProposal {
-        if let Some(block_proposer) = &mut self.block_proposer {
+        // TODO(aditi): As an optimization, we should only look inside the db on the first height after a restart. We do not need to look here in the steady state.
+        match self
+            .local_state_store
+            .get_proposal(self.shard_id.shard_id(), height, round)
+        {
+            Ok(Some(proposal)) => return proposal,
+            Ok(None) => {}
+            Err(err) => {
+                error!("Unable to retrieve proposal from db {}", err.to_string())
+            }
+        }
+        let proposal = if let Some(block_proposer) = &mut self.block_proposer {
             block_proposer.propose_value(height, round, timeout).await
         } else if let Some(shard_proposer) = &mut self.shard_proposer {
             shard_proposer.propose_value(height, round, timeout).await
         } else {
             panic!("No proposer set");
-        }
+        };
+
+        if let Err(err) = self.local_state_store.put_proposal(proposal.clone()) {
+            error!("Unable to store proposal {}", err.to_string());
+        };
+
+        proposal
     }
 }

@@ -9,6 +9,7 @@ use crate::network::gossip::GossipEvent;
 use crate::proto::{Block, ShardChunk};
 use crate::storage::db::RocksDB;
 use crate::storage::store::engine::{BlockEngine, Senders, ShardEngine};
+use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
@@ -41,6 +42,7 @@ impl SnapchainNode {
         block_tx: Option<mpsc::Sender<Block>>,
         messages_request_tx: mpsc::Sender<MempoolMessagesRequest>,
         block_store: BlockStore,
+        local_state_store: LocalStateStore,
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
         trie_branching_factor: u32,
@@ -68,7 +70,7 @@ impl SnapchainNode {
             let db = RocksDB::open_shard_db(rocksdb_dir.clone().as_str(), shard_id);
             let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap(); //TODO: don't unwrap()
             let engine = ShardEngine::new(
-                db,
+                db.clone(),
                 trie,
                 shard_id,
                 StoreLimits::default(),
@@ -95,6 +97,7 @@ impl SnapchainNode {
                 shard_validator_set.clone(),
                 None,
                 Some(shard_proposer),
+                local_state_store.clone(),
             );
             let consensus_actor = MalachiteConsensusActors::create_and_start(
                 ctx,
@@ -136,6 +139,7 @@ impl SnapchainNode {
             block_validator_set.clone(),
             Some(block_proposer),
             None,
+            local_state_store,
         );
         let ctx = SnapchainValidatorContext::new(keypair.clone());
         let block_consensus_actor = MalachiteConsensusActors::create_and_start(
