@@ -98,12 +98,34 @@ impl Host {
             HostMsg::RestreamValue {
                 height,
                 round,
-                valid_round: _,
-                address: _,
-                value_id: _,
+                valid_round,
+                address,
+                value_id,
             } => {
                 // This is only called for pol_rounds which we're not using?
-                warn!("Restream requested for value at height: {height}, round: {round}");
+                warn!("RestreamValue at height: {height}, round: {round}, valid_round: {valid_round}, value_id.hash: {:#?}, value_id.shard_index: {:#?}", hex::encode(&value_id.hash), value_id.shard_index);
+                let full_proposal = state.shard_validator.get_proposed_value(&value_id);
+                match full_proposal {
+                    None => {
+                        error!(
+                            "Could not find previously proposed value for RestreamValue: {}",
+                            hex::encode(&value_id.hash)
+                        );
+                    }
+                    Some(full_proposal) => {
+                        if full_proposal.height() != height
+                            || full_proposal.round() != round
+                            || full_proposal.proposer != address.to_vec()
+                        {
+                            info!(request_height = height.as_u64(), proposal_height = full_proposal.height().as_u64(), request_round = round.as_i64(), proposal_round = full_proposal.round().as_i64(), request_address= hex::encode(address.to_vec()), proposal_address = hex::encode(&full_proposal.proposer), "Proposal published in RestreamValue does not match height/round/proposer in the request")
+                        }
+                        let stream_message =
+                            StreamMessage::new(0, 0, StreamContent::Data(full_proposal));
+                        state
+                            .network
+                            .cast(NetworkMsg::PublishProposalPart(stream_message))?;
+                    }
+                }
             }
 
             HostMsg::GetHistoryMinHeight { reply_to } => {
