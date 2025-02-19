@@ -6,7 +6,7 @@ use crate::consensus::validator::ShardValidator;
 use crate::core::types::{Address, ShardId, SnapchainShard, SnapchainValidatorContext};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::network::gossip::GossipEvent;
-use crate::proto::{Block, ShardChunk};
+use crate::proto::{Block, FarcasterNetwork, ShardChunk};
 use crate::storage::db::RocksDB;
 use crate::storage::store::engine::{BlockEngine, Senders, ShardEngine};
 use crate::storage::store::node_local_state::LocalStateStore;
@@ -46,6 +46,7 @@ impl SnapchainNode {
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
         trie_branching_factor: u32,
+        chain_id: FarcasterNetwork,
         registry: &SharedRegistry,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
@@ -88,7 +89,6 @@ impl SnapchainNode {
                 engine,
                 statsd_client.clone(),
                 shard_decision_tx.clone(),
-                config.propose_value_delay,
             );
 
             let shard_validator = ShardValidator::new(
@@ -106,7 +106,7 @@ impl SnapchainNode {
                 rocksdb_dir.clone(),
                 gossip_tx.clone(),
                 registry,
-                config.consensus_start_delay,
+                config.clone(),
             )
             .await;
 
@@ -123,12 +123,18 @@ impl SnapchainNode {
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
         let block_validator_set = config.validator_set_for(0);
         let engine = BlockEngine::new(block_store.clone(), statsd_client.clone());
-        let shard_decision_rx = shard_decision_tx.subscribe();
+        let chain_id = match chain_id {
+            FarcasterNetwork::Mainnet => 1,
+            FarcasterNetwork::Testnet => 2,
+            FarcasterNetwork::Devnet => 3,
+            _ => 0,
+        };
         let block_proposer = BlockProposer::new(
             validator_address.clone(),
             block_shard.clone(),
-            shard_decision_rx,
+            shard_stores.clone(),
             config.num_shards,
+            chain_id,
             block_tx,
             engine,
             statsd_client.clone(),
@@ -149,7 +155,7 @@ impl SnapchainNode {
             rocksdb_dir.clone(),
             gossip_tx.clone(),
             registry,
-            config.consensus_start_delay,
+            config,
         )
         .await;
         if block_consensus_actor.is_err() {
