@@ -15,8 +15,8 @@ use crate::{
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
-    pub start_from: u64, // for testing
-    pub stop_at: u64,    // for testing
+    pub start_from: u64,
+    pub stop_at: Option<u64>,
     pub url: String,
     pub disable: bool,
 }
@@ -25,7 +25,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             start_from: 0,
-            stop_at: 200, // set this default to a small value for now, revisit later
+            stop_at: None,
             url: "https://fnames.farcaster.xyz/transfers".to_string(),
             disable: false,
         }
@@ -95,7 +95,7 @@ impl Fetcher {
     ) -> Self {
         Fetcher {
             position: cfg.start_from,
-            cfg: cfg,
+            cfg,
             mempool_tx,
             statsd_client,
             local_state_store,
@@ -156,6 +156,7 @@ impl Fetcher {
 
             info!(count, position = self.position, "found new transfers");
 
+            let mut last_transfer_id = 0;
             for t in response.transfers {
                 if t.id <= self.position {
                     return Err(FetchError::NonSequentialIds {
@@ -163,7 +164,7 @@ impl Fetcher {
                         position: self.position,
                     });
                 }
-                if t.id > self.cfg.stop_at {
+                if self.cfg.stop_at.is_some() && t.id >= self.cfg.stop_at.unwrap() {
                     return Err(FetchError::Stop);
                 }
                 self.position = t.id;
@@ -207,7 +208,10 @@ impl Fetcher {
                         "Unable to send fname transfer to mempool"
                     )
                 }
-                self.record_username_proof(t.id);
+                last_transfer_id = t.id;
+            }
+            if last_transfer_id > 0 {
+                self.record_username_proof(last_transfer_id);
             }
         }
     }
