@@ -1,5 +1,8 @@
 //! Implementation of a host actor for bridiging consensus and the application via a set of channels.
 
+use tokio::sync::mpsc;
+
+use crate::consensus::consensus::SystemMessage;
 use crate::consensus::read_validator::ReadValidator;
 use crate::core::types::SnapchainValidatorContext;
 use crate::proto::{self, Height};
@@ -31,6 +34,8 @@ pub enum ReadHostMsg {
         height: Height,
         reply_to: RpcReplyPort<Option<RawDecidedValue<SnapchainValidatorContext>>>,
     },
+
+    InitialSyncCompleted,
 }
 
 pub type ReadHostRef = ActorRef<ReadHostMsg>;
@@ -39,6 +44,7 @@ pub struct ReadHost {}
 
 pub struct ReadHostState {
     pub validator: ReadValidator,
+    pub system_tx: mpsc::Sender<SystemMessage>,
 }
 
 impl ReadHost {
@@ -80,6 +86,15 @@ impl ReadHost {
             ReadHostMsg::GetDecidedValue { height, reply_to } => {
                 let decided_value = state.validator.get_decided_value(height);
                 reply_to.send(decided_value)?;
+            }
+
+            ReadHostMsg::InitialSyncCompleted => {
+                state
+                    .system_tx
+                    .send(SystemMessage::ReadNodeFinishedInitialSync {
+                        shard_id: state.validator.shard_id,
+                    })
+                    .await?
             }
         };
 

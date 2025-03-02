@@ -104,6 +104,28 @@ pub struct State {
 
     /// Task for sending status updates
     ticker: JoinHandle<()>,
+
+    initial_sync_completed: bool,
+}
+
+impl State {
+    fn initial_sync_first_completed(&mut self) -> bool {
+        if self.initial_sync_completed {
+            return false;
+        }
+
+        if self.sync.peers.len() == 0 {
+            return false;
+        }
+
+        let sync_height = self.sync.sync_height;
+        let peer_ahead_by_threshold = self
+            .sync
+            .random_peer_with_value(sync_height.increment_by(10));
+
+        self.initial_sync_completed = peer_ahead_by_threshold.is_none();
+        return self.initial_sync_completed;
+    }
 }
 
 #[allow(dead_code)]
@@ -330,6 +352,10 @@ impl ReadSync {
                             sync::Input::ValueResponse(request_id, peer, value_response),
                         )
                         .await?;
+
+                        if state.initial_sync_first_completed() {
+                            self.host.cast(ReadHostMsg::InitialSyncCompleted)?;
+                        }
                     }
                     Response::VoteSetResponse(vote_set_response) => {
                         error!(height = %vote_set_response.height, round = %vote_set_response.round, %peer ,
@@ -417,6 +443,7 @@ impl Actor for ReadSync {
             timers: Timers::new(Box::new(myself.clone())),
             inflight: HashMap::new(),
             ticker,
+            initial_sync_completed: false,
         })
     }
 

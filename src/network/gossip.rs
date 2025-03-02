@@ -34,7 +34,8 @@ const MAX_GOSSIP_MESSAGE_SIZE: usize = 1024 * 1024 * 10; // 10 mb
 
 const CONSENSUS_TOPIC: &str = "consensus";
 const MEMPOOL_TOPIC: &str = "mempool";
-const READ_NODE_TOPIC: &str = "read-node";
+const DECIDED_VALUES: &str = "decided-values";
+const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -83,11 +84,13 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     ),
     SyncReply(InboundRequestId, sync::Response<SnapchainValidatorContext>),
     BroadcastDecidedValue(proto::DecidedValue),
+    SubscribeToDecidedValuesTopic(),
 }
 
 pub enum GossipTopic {
     Consensus,
-    ReadNode,
+    DecidedValues,
+    ReadNodePeerStatuses,
     Mempool,
     SyncRequest(MalachitePeerId, oneshot::Sender<OutboundRequestId>),
     SyncReply(InboundRequestId),
@@ -189,7 +192,7 @@ impl SnapchainGossip {
         }
 
         if read_node {
-            let topic = gossipsub::IdentTopic::new(READ_NODE_TOPIC);
+            let topic = gossipsub::IdentTopic::new(READ_NODE_PEER_STATUSES);
             let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
             if let Err(e) = result {
                 warn!("Failed to subscribe to topic: {:?}", e);
@@ -320,11 +323,12 @@ impl SnapchainGossip {
                     }
                 }
                 event = self.rx.recv() => {
-                    if let Some((gossip_topics, encoded_message)) = self.map_gossip_event_to_bytes(event) {
+                    if let Some((gossip_topics, encoded_message)) = self.process_gossip_event(event) {
                         for gossip_topic in gossip_topics {
                             match gossip_topic {
                                 GossipTopic::Consensus => self.publish(encoded_message.clone(), CONSENSUS_TOPIC),
-                                GossipTopic::ReadNode=> self.publish(encoded_message.clone(), READ_NODE_TOPIC),
+                                GossipTopic::DecidedValues=> self.publish(encoded_message.clone(), DECIDED_VALUES),
+                                GossipTopic::ReadNodePeerStatuses => self.publish(encoded_message.clone(), READ_NODE_PEER_STATUSES),
                                 GossipTopic::Mempool => self.publish(encoded_message.clone(), MEMPOOL_TOPIC),
                                 GossipTopic::SyncRequest(peer_id, reply_tx) => {
                                     let peer = peer_id.to_libp2p();
@@ -508,12 +512,21 @@ impl SnapchainGossip {
         }
     }
 
-    pub fn map_gossip_event_to_bytes(
-        &self,
+    // Return the bytes for the associated network message if there's one
+    pub fn process_gossip_event(
+        &mut self,
         event: Option<GossipEvent<SnapchainValidatorContext>>,
     ) -> Option<(Vec<GossipTopic>, Vec<u8>)> {
         let snapchain_codec = SnapchainCodec {};
         match event {
+            Some(GossipEvent::SubscribeToDecidedValuesTopic()) => {
+                let topic = gossipsub::IdentTopic::new(DECIDED_VALUES);
+                let result = self.swarm.behaviour_mut().gossipsub.subscribe(&topic);
+                if let Err(e) = result {
+                    warn!("Failed to subscribe to topic: {:?}", e);
+                }
+                None
+            }
             Some(GossipEvent::BroadcastDecidedValue(decided_value)) => {
                 let gossip_message = proto::GossipMessage {
                     gossip_message: Some(proto::gossip_message::GossipMessage::ReadNodeMessage(
@@ -526,7 +539,10 @@ impl SnapchainGossip {
                         },
                     )),
                 };
-                Some((vec![GossipTopic::ReadNode], gossip_message.encode_to_vec()))
+                Some((
+                    vec![GossipTopic::DecidedValues],
+                    gossip_message.encode_to_vec(),
+                ))
             }
             Some(GossipEvent::BroadcastSignedVote(vote)) => {
                 let vote_proto = vote.to_proto();
@@ -612,9 +628,9 @@ impl SnapchainGossip {
                         };
 
                         let topics = if self.read_node {
-                            vec![GossipTopic::ReadNode]
+                            vec![GossipTopic::ReadNodePeerStatuses]
                         } else {
-                            vec![GossipTopic::Consensus, GossipTopic::ReadNode]
+                            vec![GossipTopic::Consensus, GossipTopic::ReadNodePeerStatuses]
                         };
 
                         // Should probably use a separate topic for status messages, but these are infrequent
