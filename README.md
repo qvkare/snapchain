@@ -25,8 +25,9 @@ Snapchain is currently in early alpha. Please check the release section of the [
 
 ## Running a Read Node
 
-A read node can mirrors all the data on the Snapchain network, but cannot participate in consensus. It can validate 
-all the data, and ensure the validators are honest. They can also be used to submit messages to the global mempool.
+A read node can mirror all the data on the Snapchain network, but cannot participate in consensus. It validates
+blocks and messages, and ensure the validators are honest. It can also be used to submit messages to the global mempool,
+to be included by the validators.
 
 In order to run a read node, you need the following system requirements:
 - 16 GB of RAM
