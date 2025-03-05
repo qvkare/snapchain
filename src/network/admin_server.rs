@@ -8,6 +8,7 @@ use crate::storage::db::RocksDB;
 use crate::storage::store::engine::MempoolMessage;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use rocksdb;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use std::{io, path, process};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 pub struct DbManager {
     db_dir: String,
@@ -75,6 +76,7 @@ pub struct MyAdminService {
     shard_stores: HashMap<u32, Stores>,
     block_store: BlockStore,
     fc_network: FarcasterNetwork,
+    statsd_client: StatsdClientWrapper,
 }
 
 #[derive(Debug, Error)]
@@ -96,6 +98,7 @@ impl MyAdminService {
         block_store: BlockStore,
         snapshot_config: storage::db::snapshot::Config,
         fc_network: FarcasterNetwork,
+        statsd_client: StatsdClientWrapper,
     ) -> Self {
         Self {
             db_manager,
@@ -104,27 +107,31 @@ impl MyAdminService {
             block_store,
             snapshot_config,
             fc_network,
+            statsd_client,
         }
     }
 
     async fn backup_and_upload(
-        &self,
+        fc_network: FarcasterNetwork,
+        snapshot_config: storage::db::snapshot::Config,
         shard_id: u32,
         db: Arc<RocksDB>,
         now: i64,
+        statsd_client: StatsdClientWrapper,
     ) -> Result<(), Status> {
         // TODO(aditi): Eventually, we should upload a metadata file. For now, just clear all existing snapshots on s3 and only keep 1 snapshot per shard
-        clear_snapshots(self.fc_network, &self.snapshot_config, shard_id)
+        clear_snapshots(fc_network, &snapshot_config, shard_id)
             .await
             .map_err(|err| Status::from_error(Box::new(err)))?;
-        let backup_dir = self.snapshot_config.backup_dir.clone();
+        let backup_dir = snapshot_config.backup_dir.clone();
         let tar_gz_path = RocksDB::backup_db(db, &backup_dir, shard_id, now)
             .map_err(|err| Status::from_error(Box::new(err)))?;
         storage::db::snapshot::upload_to_s3(
-            self.fc_network,
+            fc_network,
             tar_gz_path,
-            &self.snapshot_config,
+            &snapshot_config,
             shard_id,
+            &statsd_client,
         )
         .await
         .map_err(|err| Status::from_error(Box::new(err)))?;
@@ -235,29 +242,57 @@ impl AdminService for MyAdminService {
             return Err(Status::aborted("snapshot already in progress"));
         }
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|err| Status::from_error(Box::new(err)))?
-            .as_millis();
+        let fc_network = self.fc_network.clone();
+        let snapshot_config = self.snapshot_config.clone();
+        let shard_stores = self.shard_stores.clone();
+        let block_store = self.block_store.clone();
+        let statsd_client = self.statsd_client.clone();
+        tokio::spawn(async move {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
 
-        let on_error = |err| {
-            if let Err(err) = std::fs::remove_dir_all(self.snapshot_config.backup_dir.clone()) {
+            if let Err(err) = Self::backup_and_upload(
+                fc_network,
+                snapshot_config.clone(),
+                0,
+                block_store.db.clone(),
+                now as i64,
+                statsd_client.clone(),
+            )
+            .await
+            {
+                error!(
+                    shard = 0,
+                    "Unable to upload snapshot for shard {}",
+                    err.to_string()
+                )
+            }
+
+            for (shard, stores) in shard_stores.iter() {
+                if let Err(err) = Self::backup_and_upload(
+                    fc_network,
+                    snapshot_config.clone(),
+                    *shard,
+                    stores.db.clone(),
+                    now as i64,
+                    statsd_client.clone(),
+                )
+                .await
+                {
+                    error!(
+                        shard,
+                        "Unable to upload snapshot for shard {}",
+                        err.to_string()
+                    );
+                }
+            }
+
+            if let Err(err) = std::fs::remove_dir_all(snapshot_config.backup_dir.clone()) {
                 info!("Unable to remove snapshot directory: {}", err.to_string());
             }
-            // Maintain the original error
-            err
-        };
-
-        self.backup_and_upload(0, self.block_store.db.clone(), now as i64)
-            .await
-            .map_err(|err| on_error(err))?;
-        for (shard, stores) in self.shard_stores.iter() {
-            self.backup_and_upload(*shard, stores.db.clone(), now as i64)
-                .await
-                .map_err(|err| on_error(err))?
-        }
-
-        std::fs::remove_dir_all(self.snapshot_config.backup_dir.clone())?;
+        });
 
         Ok(Response::new(Empty {}))
     }

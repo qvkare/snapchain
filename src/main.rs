@@ -60,6 +60,7 @@ async fn start_servers(
         block_store.clone(),
         app_config.snapshot.clone(),
         app_config.fc_network,
+        statsd_client.clone(),
     );
 
     let service = Arc::new(MyHubService::new(
