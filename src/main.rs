@@ -6,7 +6,7 @@ use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::mempool::mempool::{Mempool, MempoolSource, ReadNodeMempool};
 use snapchain::mempool::routing;
-use snapchain::network::admin_server::{DbManager, MyAdminService};
+use snapchain::network::admin_server::MyAdminService;
 use snapchain::network::gossip::{GossipEvent, SnapchainGossip};
 use snapchain::network::http_server::HubHttpServiceImpl;
 use snapchain::network::server::MyHubService;
@@ -35,8 +35,6 @@ use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-const READ_NODE_EXPIRES_AT: i64 = 1742515200000; // March 21 2025
-
 async fn start_servers(
     app_config: &snapchain::cfg::Config,
     mempool_tx: mpsc::Sender<(MempoolMessage, MempoolSource)>,
@@ -50,11 +48,8 @@ async fn start_servers(
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse().unwrap();
 
-    let mut db_manager = DbManager::new(app_config.rocksdb_dir.clone().as_str());
-    db_manager.maybe_destroy_databases().unwrap();
-
     let admin_service = MyAdminService::new(
-        db_manager,
+        app_config.admin_rpc_auth.clone(),
         mempool_tx.clone(),
         shard_stores.clone(),
         block_store.clone(),
@@ -64,11 +59,14 @@ async fn start_servers(
     );
 
     let service = Arc::new(MyHubService::new(
+        app_config.rpc_auth.clone(),
         block_store.clone(),
         shard_stores.clone(),
         shard_senders,
         statsd_client.clone(),
         app_config.consensus.num_shards,
+        app_config.fc_network,
+        app_config.read_node,
         Box::new(routing::ShardRouter {}),
         mempool_tx.clone(),
         l1_client,
@@ -77,11 +75,14 @@ async fn start_servers(
     let grpc_shutdown_tx = shutdown_tx.clone();
     tokio::spawn(async move {
         info!(grpc_addr = grpc_addr, "GrpcService listening",);
-        let resp = Server::builder()
-            .add_service(HubServiceServer::from_arc(grpc_service))
-            .add_service(AdminServiceServer::new(admin_service))
-            .serve(grpc_socket_addr)
-            .await;
+        let mut server = Server::builder().add_service(HubServiceServer::from_arc(grpc_service));
+
+        if admin_service.enabled() {
+            let admin_service = AdminServiceServer::new(admin_service);
+            server = server.add_service(admin_service);
+        }
+
+        let resp = server.serve(grpc_socket_addr).await;
 
         let msg = "grpc server stopped";
         match resp {
@@ -223,7 +224,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let keypair = app_config.consensus.keypair().clone();
 
-    let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
+    let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(1000);
     let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
 
     let gossip_result = SnapchainGossip::create(
@@ -274,13 +275,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
 
     if app_config.read_node {
-        // Expire the read node build after 2 weeks
-        if chrono::Utc::now().timestamp_millis() > READ_NODE_EXPIRES_AT {
-            error!("Read node build has expired. Please update to the latest version.");
-            shutdown_tx.send(()).await.ok();
-            process::exit(1);
-        }
-
         let node = SnapchainReadNode::create(
             keypair.clone(),
             app_config.consensus.clone(),
@@ -292,6 +286,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.rocksdb_dir.clone(),
             statsd_client.clone(),
             app_config.trie_branching_factor,
+            app_config.fc_network,
             registry,
         )
         .await;

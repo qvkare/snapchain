@@ -154,6 +154,7 @@ impl ReadNodeForTest {
             make_tmp_path(),
             statsd_client.clone(),
             16,
+            FarcasterNetwork::Testnet,
             registry,
         )
         .await;
@@ -302,11 +303,14 @@ impl NodeForTest {
         join_handles.push(handle);
 
         let service = MyHubService::new(
+            "".to_string(),
             block_store.clone(),
             node.shard_stores.clone(),
             node.shard_senders.clone(),
             statsd_client.clone(),
             num_shards,
+            FarcasterNetwork::Testnet,
+            false,
             Box::new(routing::EvenOddRouterForTest {}),
             mempool_tx.clone(),
             None,

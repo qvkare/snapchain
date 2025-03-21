@@ -34,12 +34,21 @@ pub struct BlockPage {
     pub next_page_token: Option<Vec<u8>>,
 }
 
+#[inline]
 fn make_block_key(block_number: u64) -> Vec<u8> {
     // Store the prefix in the first byte so there's no overlap across different stores
     let mut key = vec![RootPrefix::Block as u8];
     // Store the block number in the next 8 bytes
     key.extend_from_slice(&block_number.to_be_bytes());
 
+    key
+}
+
+#[inline]
+fn make_block_timestamp_index(shard_index: u32, timestamp: u64) -> Vec<u8> {
+    let mut key = vec![RootPrefix::BlockIndex as u8];
+    key.extend_from_slice(&shard_index.to_be_bytes());
+    key.extend_from_slice(&timestamp.to_be_bytes());
     key
 }
 
@@ -136,7 +145,6 @@ pub fn get_blocks_in_range(
 }
 
 pub fn put_block(db: &RocksDB, block: &Block) -> Result<(), BlockStorageError> {
-    // TODO: We need to introduce a transaction model
     let mut txn = db.txn();
     let header = block
         .header
@@ -147,7 +155,14 @@ pub fn put_block(db: &RocksDB, block: &Block) -> Result<(), BlockStorageError> {
         .as_ref()
         .ok_or(BlockStorageError::BlockMissingHeight)?;
     let primary_key = make_block_key(height.block_number);
-    txn.put(primary_key, block.encode_to_vec());
+    txn.put(primary_key.clone(), block.encode_to_vec());
+
+    let timestamp_index_key = make_block_timestamp_index(0, header.timestamp);
+
+    if db.get(&timestamp_index_key)? == None {
+        txn.put(timestamp_index_key, primary_key);
+    }
+
     db.commit(txn)?;
     Ok(())
 }
@@ -162,14 +177,17 @@ impl BlockStore {
         BlockStore { db }
     }
 
+    #[inline]
     pub fn put_block(&self, block: &Block) -> Result<(), BlockStorageError> {
         put_block(&self.db, block)
     }
 
+    #[inline]
     pub fn get_last_block(&self) -> Result<Option<Block>, BlockStorageError> {
         get_last_block(&self.db)
     }
 
+    #[inline]
     pub fn get_block_by_height(&self, height: u64) -> Result<Option<Block>, BlockStorageError> {
         let block_key = make_block_key(height);
         let block = self.db.get(&block_key)?;
@@ -185,6 +203,7 @@ impl BlockStore {
         }
     }
 
+    #[inline]
     pub fn max_block_number(&self) -> Result<u64, BlockStorageError> {
         let current_header = get_current_header(&self.db)?;
         match current_header {
@@ -196,6 +215,7 @@ impl BlockStore {
         }
     }
 
+    #[inline]
     pub fn max_block_timestamp(&self) -> Result<u64, BlockStorageError> {
         let current_header = get_current_header(&self.db)?;
         match current_header {
@@ -204,6 +224,7 @@ impl BlockStore {
         }
     }
 
+    #[inline]
     pub fn get_blocks(
         &self,
         start_block_number: u64,

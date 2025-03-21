@@ -1,4 +1,4 @@
-use super::rpc_extensions::{AsMessagesResponse, AsSingleMessageResponse};
+use super::rpc_extensions::{authenticate_request, AsMessagesResponse, AsSingleMessageResponse};
 use crate::connectors::onchain_events::L1Client;
 use crate::core::error::HubError;
 use crate::core::util::get_farcaster_time;
@@ -67,6 +67,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 
 pub struct MyHubService {
+    allowed_users: HashMap<String, String>,
     block_store: BlockStore,
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
@@ -75,20 +76,35 @@ pub struct MyHubService {
     statsd_client: StatsdClientWrapper,
     l1_client: Option<Box<dyn L1Client>>,
     mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
+    network: proto::FarcasterNetwork,
+    is_read_node: bool,
 }
 
 impl MyHubService {
     pub fn new(
+        rpc_auth: String,
         block_store: BlockStore,
         shard_stores: HashMap<u32, Stores>,
         shard_senders: HashMap<u32, Senders>,
         statsd_client: StatsdClientWrapper,
         num_shards: u32,
+        network: proto::FarcasterNetwork,
+        is_read_node: bool,
         message_router: Box<dyn routing::MessageRouter>,
         mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
         l1_client: Option<Box<dyn L1Client>>,
     ) -> Self {
-        Self {
+        let mut allowed_users = HashMap::new();
+        for auth in rpc_auth.split(",") {
+            let parts: Vec<&str> = auth.split(":").collect();
+            if parts.len() == 2 {
+                allowed_users.insert(parts[0].to_string(), parts[1].to_string());
+            }
+        }
+
+        let service = Self {
+            allowed_users,
+            network,
             block_store,
             shard_senders,
             shard_stores,
@@ -97,7 +113,9 @@ impl MyHubService {
             num_shards,
             l1_client,
             mempool_tx,
-        }
+            is_read_node,
+        };
+        service
     }
 
     async fn submit_message_internal(
@@ -112,7 +130,14 @@ impl MyHubService {
             ));
         }
 
-        let dst_shard = self.message_router.route_message(fid, self.num_shards);
+        // Temporarily disallow public mempool access until after mainnet is caught up
+        if self.network == proto::FarcasterNetwork::Mainnet && self.is_read_node {
+            return Err(Status::permission_denied(
+                "non-validating nodes cannot submit to mempool until backfill is complete",
+            ));
+        }
+
+        let dst_shard = self.message_router.route_fid(fid, self.num_shards);
 
         let stores = match self.shard_stores.get(&dst_shard) {
             Some(store) => store,
@@ -127,6 +152,7 @@ impl MyHubService {
             // TODO: This is a hack to get around the fact that self cannot be made mutable
             let mut readonly_engine = ShardEngine::new(
                 stores.db.clone(),
+                self.network,
                 stores.trie.clone(),
                 1,
                 stores.store_limits.clone(),
@@ -221,7 +247,7 @@ impl MyHubService {
     }
 
     fn get_stores_for(&self, fid: u64) -> Result<&Stores, Status> {
-        let shard_id = self.message_router.route_message(fid, self.num_shards);
+        let shard_id = self.message_router.route_fid(fid, self.num_shards);
         self.get_stores_for_shard(shard_id)
     }
 
@@ -379,51 +405,13 @@ impl MyHubService {
 
 #[tonic::async_trait]
 impl HubService for MyHubService {
-    async fn submit_message_with_options(
-        &self,
-        request: Request<proto::SubmitMessageRequest>,
-    ) -> Result<Response<proto::SubmitMessageResponse>, Status> {
-        let start_time = std::time::Instant::now();
-
-        let hash = request
-            .get_ref()
-            .message
-            .as_ref()
-            .map(|msg| msg.hash.encode_hex::<String>())
-            .unwrap_or_default();
-        debug!(%hash, "Received call to [submit_message_with_options] RPC");
-
-        let proto::SubmitMessageRequest {
-            message,
-            bypass_validation,
-        } = request.into_inner();
-
-        let message = match message {
-            Some(msg) => msg,
-            None => return Err(Status::invalid_argument("Message is required")),
-        };
-
-        let response_message = self
-            .submit_message_internal(message, bypass_validation.unwrap_or(false))
-            .await?;
-
-        let response = proto::SubmitMessageResponse {
-            message: Some(response_message),
-        };
-
-        self.statsd_client.time(
-            "rpc.submit_message_with_options.duration",
-            start_time.elapsed().as_millis() as u64,
-        );
-
-        Ok(Response::new(response))
-    }
-
     async fn submit_message(
         &self,
         request: Request<proto::Message>,
     ) -> Result<Response<proto::Message>, Status> {
         let start_time = std::time::Instant::now();
+
+        authenticate_request(&request, &self.allowed_users)?;
 
         let hash = request.get_ref().hash.encode_hex::<String>();
         debug!(hash, "Received call to [submit_message] RPC");
@@ -592,6 +580,8 @@ impl HubService for MyHubService {
         &self,
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
+        authenticate_request(&request, &self.allowed_users)?;
+
         info!("Received call to [subscribe] RPC");
         let (server_tx, client_rx) = mpsc::channel::<Result<HubEvent, Status>>(100);
         let events_txs = match request.get_ref().shard_index {
@@ -874,8 +864,8 @@ impl HubService for MyHubService {
         request: Request<Message>,
     ) -> Result<Response<ValidationResponse>, Status> {
         let request = request.into_inner();
-        let result =
-            validations::message::validate_message(&request).map_or_else(|_| false, |_| true);
+        let result = validations::message::validate_message(&request, self.network)
+            .map_or_else(|_| false, |_| true);
 
         Ok(Response::new(ValidationResponse {
             valid: result,

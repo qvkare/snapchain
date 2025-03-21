@@ -39,9 +39,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            queue_size: 500,
+            queue_size: 5000,
             allow_unlimited_mempool_size: false,
-            capacity_per_shard: 1024,
+            capacity_per_shard: 100_000,
             rx_poll_interval: Duration::from_millis(1),
         }
     }
@@ -251,7 +251,7 @@ impl ReadNodeMempool {
 
     fn message_is_valid(&mut self, message: &MempoolMessage) -> bool {
         let fid = message.fid();
-        let shard = self.message_router.route_message(fid, self.num_shards);
+        let shard = self.message_router.route_fid(fid, self.num_shards);
         if self.message_already_exists(shard, message) {
             return false;
         }
@@ -313,7 +313,7 @@ impl Mempool {
         let shard = self
             .read_node_mempool
             .message_router
-            .route_message(fid, self.read_node_mempool.num_shards);
+            .route_fid(fid, self.read_node_mempool.num_shards);
 
         self.read_node_mempool
             .message_already_exists(shard, message)
@@ -355,7 +355,7 @@ impl Mempool {
         let shard_id = self
             .read_node_mempool
             .message_router
-            .route_message(fid, self.read_node_mempool.num_shards);
+            .route_fid(fid, self.read_node_mempool.num_shards);
 
         match self.messages.get_mut(&shard_id) {
             Some(shard_messages) => {
