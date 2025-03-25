@@ -1,5 +1,5 @@
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
-use crate::mempool::mempool::MempoolMessageWithSource;
+use crate::mempool::mempool::MempoolRequest;
 use crate::proto;
 pub use informalsystems_malachitebft_core_consensus::Params as ConsensusParams;
 pub use informalsystems_malachitebft_core_consensus::State as ConsensusState;
@@ -16,7 +16,7 @@ pub enum MalachiteEventShard {
 #[derive(Debug)]
 pub enum SystemMessage {
     MalachiteNetwork(MalachiteEventShard, MalachiteNetworkEvent), // Shard Id and the malachite network event
-    Mempool(MempoolMessageWithSource),
+    Mempool(MempoolRequest),
 
     DecidedValueForReadNode(proto::DecidedValue),
 
@@ -111,7 +111,7 @@ impl Default for Config {
             block_time: Duration::from_millis(1000),
             max_messages_per_block: 1000,
             validator_addresses: None,
-            validator_sets: Some(vec![]),
+            validator_sets: None,
             consensus_start_delay: 2,
         }
     }
