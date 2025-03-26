@@ -1,7 +1,8 @@
+use crate::connectors::onchain_events::OnchainEventsRequest;
 use crate::mempool::mempool::MempoolRequest;
 use crate::network::rpc_extensions::authenticate_request;
 use crate::proto::admin_service_server::AdminService;
-use crate::proto::{Empty, FarcasterNetwork};
+use crate::proto::{self, Empty, FarcasterNetwork, RetryOnchainEventsRequest};
 use crate::storage;
 use crate::storage::db::snapshot::clear_snapshots;
 use crate::storage::db::RocksDB;
@@ -21,6 +22,7 @@ use tracing::{error, info};
 pub struct MyAdminService {
     allowed_users: HashMap<String, String>,
     pub mempool_tx: mpsc::Sender<MempoolRequest>,
+    onchain_events_request_tx: mpsc::Sender<OnchainEventsRequest>,
     snapshot_config: storage::db::snapshot::Config,
     shard_stores: HashMap<u32, Stores>,
     block_store: BlockStore,
@@ -41,6 +43,7 @@ impl MyAdminService {
     pub fn new(
         rpc_auth: String,
         mempool_tx: mpsc::Sender<MempoolRequest>,
+        onchain_events_request_tx: mpsc::Sender<OnchainEventsRequest>,
         shard_stores: HashMap<u32, Stores>,
         block_store: BlockStore,
         snapshot_config: storage::db::snapshot::Config,
@@ -58,6 +61,7 @@ impl MyAdminService {
         Self {
             allowed_users,
             mempool_tx,
+            onchain_events_request_tx,
             shard_stores,
             block_store,
             snapshot_config,
@@ -169,6 +173,33 @@ impl AdminService for MyAdminService {
     //         Err(err) => Err(Status::from_error(Box::new(err))),
     //     }
     // }
+
+    async fn retry_onchain_events(
+        &self,
+        request: Request<RetryOnchainEventsRequest>,
+    ) -> std::result::Result<Response<Empty>, Status> {
+        match request.into_inner().kind {
+            None => {}
+            Some(kind) => match kind {
+                proto::retry_onchain_events_request::Kind::Fid(fid) => {
+                    self.onchain_events_request_tx
+                        .send(OnchainEventsRequest::RetryFid(fid))
+                        .await
+                        .map_err(|err| Status::from_error(Box::new(err)))?;
+                }
+                proto::retry_onchain_events_request::Kind::BlockRange(retry_block_number_range) => {
+                    self.onchain_events_request_tx
+                        .send(OnchainEventsRequest::RetryBlockRange {
+                            start_block_number: retry_block_number_range.start_block_number,
+                            stop_block_number: retry_block_number_range.stop_block_number,
+                        })
+                        .await
+                        .map_err(|err| Status::from_error(Box::new(err)))?;
+                }
+            },
+        }
+        Ok(Response::new(Empty {}))
+    }
 
     async fn upload_snapshot(
         &self,
