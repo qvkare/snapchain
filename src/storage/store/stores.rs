@@ -1,13 +1,14 @@
 use super::account::{
-    ReactionStore, ReactionStoreDef, UserDataStore, UserDataStoreDef, VerificationStore,
-    VerificationStoreDef,
+    EventsPage, ReactionStore, ReactionStoreDef, UserDataStore, UserDataStoreDef,
+    VerificationStore, VerificationStoreDef,
 };
 use crate::core::error::HubError;
 use crate::proto::MessageType;
 use crate::proto::{
     HubEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails, StorageUnitType, StoreType,
 };
-use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+use crate::storage::constants::PAGE_SIZE_MAX;
+use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
     CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError, OnchainEventStore, Store,
     StoreEventHandler, UsernameProofStore, UsernameProofStoreDef,
@@ -15,8 +16,11 @@ use crate::storage::store::account::{
 use crate::storage::store::shard::ShardStore;
 use crate::storage::trie::merkle_trie;
 use crate::storage::trie::merkle_trie::TrieKey;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
+use tracing::{error, info};
 
 #[derive(Error, Debug)]
 pub enum StoresError {
@@ -47,6 +51,8 @@ pub struct Stores {
     pub(crate) trie: merkle_trie::MerkleTrie,
     pub store_limits: StoreLimits,
     pub event_handler: Arc<StoreEventHandler>,
+    pub shard_id: u32,
+    pub statsd: StatsdClientWrapper,
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +171,7 @@ impl Stores {
         shard_id: u32,
         mut trie: merkle_trie::MerkleTrie,
         store_limits: StoreLimits,
+        statsd: StatsdClientWrapper,
     ) -> Stores {
         trie.initialize(&db).unwrap();
 
@@ -178,6 +185,7 @@ impl Stores {
         let onchain_event_store = OnchainEventStore::new(db.clone(), event_handler.clone());
         let username_proof_store = UsernameProofStore::new(db.clone(), event_handler.clone(), 100);
         Stores {
+            shard_id,
             trie,
             shard_store,
             cast_store,
@@ -190,6 +198,7 @@ impl Stores {
             db: db.clone(),
             store_limits,
             event_handler,
+            statsd,
         }
     }
 
@@ -337,6 +346,119 @@ impl Stores {
                 })?,
         );
         Ok(revoke_events)
+    }
+
+    pub fn get_events(
+        &self,
+        start_id: u64,
+        stop_id: Option<u64>,
+        page_options: Option<PageOptions>,
+    ) -> Result<EventsPage, HubError> {
+        HubEvent::get_events(self.db.clone(), start_id, stop_id, page_options)
+    }
+
+    pub fn get_next_height_by_timestamp(&self, timestamp: u64) -> Option<u64> {
+        self.shard_store
+            .get_next_height_by_timestamp(timestamp)
+            .unwrap_or_else(|e| {
+                error!(
+                    "Error getting next height by timestamp for shard {}: {}",
+                    self.shard_id, e
+                );
+                None
+            })
+    }
+
+    pub async fn prune_events_until(
+        &self,
+        timestamp: u64,
+        throttle: Duration,
+        page_options: Option<PageOptions>,
+    ) -> Result<u32, HubError> {
+        let stop_height = self.get_next_height_by_timestamp(timestamp);
+
+        let page_options = page_options.unwrap_or(PageOptions {
+            page_size: Some(PAGE_SIZE_MAX),
+            ..PageOptions::default()
+        });
+
+        if let Some(stop_height) = stop_height {
+            info!(
+                "Pruning events for shard {} older than timestamp: {}, height: {}",
+                self.shard_id, timestamp, stop_height
+            );
+            let start = std::time::Instant::now();
+            let count =
+                HubEvent::prune_events_util(self.db.clone(), stop_height, &page_options, throttle)
+                    .await?;
+            let elapsed = start.elapsed();
+            self.statsd
+                .count_with_shard(self.shard_id, "prune.events", count as u64);
+            self.statsd.time_with_shard(
+                self.shard_id,
+                "prune.events_time_ms",
+                elapsed.as_millis() as u64,
+            );
+            info!(
+                "Pruning events complete for shard {}. Pruned {} events in {} seconds",
+                self.shard_id,
+                count,
+                elapsed.as_secs()
+            );
+            Ok(count)
+        } else {
+            info!("No events to prune for shard {}", self.shard_id);
+            self.statsd
+                .count_with_shard(self.shard_id, "prune.events", 0);
+            Ok(0)
+        }
+    }
+
+    pub async fn prune_shard_chunks_until(
+        &self,
+        timestamp: u64,
+        throttle: Duration,
+        page_options: Option<PageOptions>,
+    ) -> Result<u32, HubError> {
+        let stop_height = self.get_next_height_by_timestamp(timestamp);
+        if let Some(stop_height) = stop_height {
+            info!(
+                "Pruning shard {} blocks older than timestamp: {}, height: {}",
+                self.shard_id, timestamp, stop_height
+            );
+            let page_options = page_options.unwrap_or(PageOptions {
+                page_size: Some(PAGE_SIZE_MAX),
+                ..PageOptions::default()
+            });
+
+            let start = std::time::Instant::now();
+            let count = self
+                .shard_store
+                .prune_until(stop_height, &page_options, throttle)
+                .await
+                .unwrap_or_else(|e| {
+                    error!("Error pruning shard {} blocks: {}", self.shard_id, e);
+                    0
+                });
+            let elapsed = start.elapsed();
+            self.statsd.time_with_shard(
+                self.shard_id,
+                "prune.chunks_time_ms",
+                elapsed.as_millis() as u64,
+            );
+            self.statsd
+                .count_with_shard(self.shard_id, "prune.shard_chunks", count as u64);
+            info!(
+                "Pruning shard chunks complete for shard {}. Pruned {} chunks in {} seconds",
+                self.shard_id,
+                count,
+                elapsed.as_secs()
+            );
+            Ok(count)
+        } else {
+            info!("No shard chunks to prune for shard {}", self.shard_id);
+            Ok(0)
+        }
     }
 }
 
