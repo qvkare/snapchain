@@ -269,6 +269,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &app_config.gossip,
         system_tx.clone(),
         app_config.read_node,
+        app_config.fc_network,
+        statsd_client.clone(),
     );
 
     if let Err(e) = gossip_result {
@@ -378,8 +380,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // [num_shards] doesn't account for the block shard, so account for it manually
                             if shards_finished_syncing.len() as u32 == app_config.consensus.num_shards + 1 {
                                 info!("Initial sync completed for all shards");
-                                sync_complete_tx.send(true)?;
-                                gossip_tx.send(GossipEvent::SubscribeToDecidedValuesTopic()).await?
+
+                                if let Err(err) = sync_complete_tx.send(true)
+                                {
+                                    // This happens if there's no block retention threshold configured
+                                    info!("Could not send sync complete message to jobs: {}", err.to_string());
+                                }
+
+                                if let Err(err) =
+                                gossip_tx.send(GossipEvent::SubscribeToDecidedValuesTopic()).await {
+                                    panic!("Could not send sync complete message to gossip: {}", err.to_string());
+                                }
                             }
                         }
                         SystemMessage::MalachiteNetwork(shard, event) => {

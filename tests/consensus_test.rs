@@ -132,8 +132,16 @@ impl ReadNodeForTest {
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
 
-        let mut gossip =
-            SnapchainGossip::create(keypair.clone(), &config, system_tx.clone(), false).unwrap();
+        let fc_network = FarcasterNetwork::Testnet;
+        let mut gossip = SnapchainGossip::create(
+            keypair.clone(),
+            &config,
+            system_tx.clone(),
+            false,
+            fc_network,
+            statsd_client.clone(),
+        )
+        .unwrap();
         let gossip_tx = gossip.tx.clone();
 
         let registry = SharedRegistry::global();
@@ -155,7 +163,7 @@ impl ReadNodeForTest {
             make_tmp_path(),
             statsd_client.clone(),
             16,
-            FarcasterNetwork::Testnet,
+            fc_network,
             registry,
         )
         .await;
@@ -224,9 +232,17 @@ impl NodeForTest {
         consensus_config.block_time = time::Duration::from_millis(250);
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
+        let fc_network = FarcasterNetwork::Testnet;
 
-        let mut gossip =
-            SnapchainGossip::create(keypair.clone(), &config, system_tx.clone(), false).unwrap();
+        let mut gossip = SnapchainGossip::create(
+            keypair.clone(),
+            &config,
+            system_tx.clone(),
+            false,
+            fc_network,
+            statsd_client.clone(),
+        )
+        .unwrap();
         let gossip_tx = gossip.tx.clone();
 
         let registry = SharedRegistry::global();
@@ -254,7 +270,7 @@ impl NodeForTest {
             make_tmp_path(),
             statsd_client.clone(),
             16,
-            FarcasterNetwork::Testnet,
+            fc_network,
             registry,
         )
         .await;
