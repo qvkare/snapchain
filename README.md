@@ -115,7 +115,9 @@ make clean
 ## Publishing
 
 1. Update `package.version` in `Cargo.toml`
-2. Commit the change.
-3. Tag the commit using `snapchain_version=$(awk -F '"' '/^version =/ {print $2}' Cargo.toml) git tag -s -m "$snapchain_version" "v$snapchain_version"`
-4. Push the commit and tag to trigger an automated build.
-5. Once automated build is complete, confirm the Docker image was [published](https://hub.docker.com/r/farcasterxyz/snapchain)
+2. Run `cargo build`, to make sure everything is working and update cargo.lock
+3. Update the changelog by running `SNAPCHAIN_VERSION=0.x.y make changelog`
+4. Commit the change and create and merge the PR
+5. Ensure you have the release commit `git checkout main && git pull`
+6. Tag the commit using `git tag v0.x.y`, and push it with `git push origin HEAD --tags` to trigger the docker build
+7. Once automated build is complete, confirm the Docker image was [published](https://hub.docker.com/r/farcasterxyz/snapchain)

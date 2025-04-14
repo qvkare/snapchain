@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.4] - 2025-04-14
+
+### 🚀 Features
+
+- Add snapshot upload background job (#355)
+- Verify commit signatures when processing decided values (#280)
+- Docs (#360)
+- Return error codes in standard format on submit (#369)
+
+### 🐛 Bug Fixes
+
+- Remove auth requirement for subscribe endpoint (#361)
+- Keep subscribe shard index backwards compatible (#364)
+- Reduce sync timeouts (#366)
+- Retry connections to bootstrap peers (#367)
+- Properly track stats on submit message failures (#370)
+
+### ⚙️ Miscellaneous Tasks
+
+- Enable snapshots for read nodes (#362)
+
 ## [0.2.3] - 2025-04-04
 
 ### 🚀 Features
