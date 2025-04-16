@@ -223,7 +223,7 @@ pub struct IdRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct InfoRequest {}
+pub struct InfoRequest {} // Doesn't take dbstats not sure if issue
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InfoResponse {
@@ -297,18 +297,18 @@ pub struct CastsByParentRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionRequest {
     fid: u64,
-    #[serde(rename = "reactionType")]
-    reaction_type: ReactionType,
-    #[serde(rename = "targetCastId", skip_serializing_if = "Option::is_none")]
-    target_cast_id: Option<CastId>,
-    #[serde(rename = "targetUrl", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     target_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_fid: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_hash: Option<String>,
+    reaction_type: ReactionType,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionsByFidRequest {
     fid: u64,
-    #[serde(rename = "reactionType")]
     reaction_type: ReactionType,
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
@@ -319,12 +319,27 @@ pub struct ReactionsByFidRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReactionsByCastRequest {
+    pub target_fid: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reaction_type: Option<ReactionType>,
+    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionsByTargetRequest {
-    #[serde(rename = "targetCastId", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub target_cast_id: Option<CastId>,
-    #[serde(rename = "targetUrl", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "url", skip_serializing_if = "Option::is_none")]
     pub target_url: Option<String>,
-    #[serde(rename = "reactionType", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reaction_type: Option<ReactionType>,
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
@@ -337,17 +352,16 @@ pub struct ReactionsByTargetRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LinkRequest {
     fid: u64,
-    #[serde(rename = "linkType")]
     link_type: String,
-    #[serde(rename = "targetFid", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     target_fid: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LinksByTargetRequest {
-    #[serde(rename = "targetFid", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     target_fid: Option<u64>,
-    #[serde(rename = "linkType", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     link_type: Option<String>,
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
@@ -532,7 +546,6 @@ pub struct OnChainEventResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OnChainEventRequest {
     fid: u64,
-    #[serde(rename = "eventType")]
     event_type: OnChainEventType,
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
@@ -1151,7 +1164,7 @@ pub trait HubHttpService {
     ) -> Result<PagedResponse, ErrorResponse>;
     async fn get_reactions_by_cast(
         &self,
-        req: ReactionsByTargetRequest,
+        req: ReactionsByCastRequest,
     ) -> Result<PagedResponse, ErrorResponse>;
     async fn get_reactions_by_target(
         &self,
@@ -1334,18 +1347,19 @@ impl HubHttpService for HubHttpServiceImpl {
 
     async fn get_reaction_by_id(&self, req: ReactionRequest) -> Result<Message, ErrorResponse> {
         let service = &self.service;
-        let target = if req.target_cast_id.is_some() {
-            let cast_id = req.target_cast_id.unwrap();
-            let hash = hex::decode(cast_id.hash.replace("0x", ""));
-            if hash.is_err() {
-                return Err(ErrorResponse {
-                    error: hash.unwrap_err().to_string(),
-                    error_detail: None,
-                });
-            }
+        let target = if req.target_fid.is_some() {
+            let hash = if let Some(hash_str) = req.target_hash.as_deref() {
+                hex::decode(hash_str.trim_start_matches("0x")).map_err(|e| ErrorResponse {
+                    error: "Invalid hash".to_string(),
+                    error_detail: Some(e.to_string()),
+                })?
+            } else {
+                Vec::new()
+            };
+
             reaction_request::Target::TargetCastId(proto::CastId {
-                fid: cast_id.fid,
-                hash: hash.unwrap(),
+                fid: req.target_fid.expect("target fid not specified"),
+                hash,
             })
         } else if req.target_url.is_some() {
             reaction_request::Target::TargetUrl(req.target_url.unwrap())
@@ -1398,30 +1412,22 @@ impl HubHttpService for HubHttpServiceImpl {
     /// GET /v1/reactionsByCast
     async fn get_reactions_by_cast(
         &self,
-        req: ReactionsByTargetRequest,
+        req: ReactionsByCastRequest,
     ) -> Result<PagedResponse, ErrorResponse> {
-        let service = &self.service;
-        let target = if req.target_cast_id.is_some() {
-            let cast_id = req.target_cast_id.unwrap();
-            let hash = hex::decode(cast_id.hash.replace("0x", ""));
-            if hash.is_err() {
-                return Err(ErrorResponse {
-                    error: hash.unwrap_err().to_string(),
-                    error_detail: None,
-                });
-            }
-            reactions_by_target_request::Target::TargetCastId(proto::CastId {
-                fid: cast_id.fid,
-                hash: hash.unwrap(),
-            })
-        } else if req.target_url.is_some() {
-            reactions_by_target_request::Target::TargetUrl(req.target_url.unwrap())
+        let hash = if let Some(hash_str) = req.target_hash.as_deref() {
+            hex::decode(hash_str.trim_start_matches("0x")).map_err(|e| ErrorResponse {
+                error: "Invalid hash".to_string(),
+                error_detail: Some(e.to_string()),
+            })?
         } else {
-            return Err(ErrorResponse {
-                error: "target not specified".to_string(),
-                error_detail: None,
-            });
+            Vec::new()
         };
+
+        let target = reactions_by_target_request::Target::TargetCastId(proto::CastId {
+            fid: req.target_fid,
+            hash,
+        });
+
         let grpc_req = tonic::Request::new(proto::ReactionsByTargetRequest {
             reaction_type: req.reaction_type.map(|r| r as i32),
             page_size: req.page_size,
@@ -1429,14 +1435,16 @@ impl HubHttpService for HubHttpServiceImpl {
             reverse: req.reverse,
             target: Some(target),
         });
-        let response =
-            service
-                .get_reactions_by_cast(grpc_req)
-                .await
-                .map_err(|e| ErrorResponse {
-                    error: "Failed to get reactions by cast".to_string(),
-                    error_detail: Some(e.to_string()),
-                })?;
+
+        let response = self
+            .service
+            .get_reactions_by_target(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get reactions by cast".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+
         let proto_resp = response.into_inner();
         map_proto_messages_response_to_json_paged_response(proto_resp)
     }
@@ -2023,7 +2031,7 @@ impl Router {
                 .await
             }
             (&Method::GET, "/v1/reactionsByCast") => {
-                self.handle_request::<ReactionsByTargetRequest, PagedResponse, _>(
+                self.handle_request::<ReactionsByCastRequest, PagedResponse, _>(
                     req,
                     |service, req| {
                         Box::pin(async move { service.get_reactions_by_cast(req).await })
@@ -2063,6 +2071,7 @@ impl Router {
                 )
                 .await
             }
+            // missing user_data_type
             (&Method::GET, "/v1/userDataByFid") => {
                 self.handle_request::<FidRequest, PagedResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_user_data_by_fid(req).await })
@@ -2096,12 +2105,14 @@ impl Router {
                 })
                 .await
             }
+            // Missing address
             (&Method::GET, "/v1/verificationsByFid") => {
                 self.handle_request::<FidRequest, PagedResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_verifications_by_fid(req).await })
                 })
                 .await
             }
+            // Missing signer
             (&Method::GET, "/v1/onChainSignersByFid") => {
                 self.handle_request::<FidRequest, OnChainEventResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_on_chain_signers_by_fid(req).await })
