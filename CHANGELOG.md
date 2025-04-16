@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.5] - 2025-04-16
+
+### 🚀 Features
+
+- Return block number as a field in Event (#359)
+
+### 🐛 Bug Fixes
+
+- Change query params to be backwards compatible with hubs (#363)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add metrics for the number of concurrent submit_message requests (#371)
+- Add technical spec to docs (#372)
+
 ## [0.2.4] - 2025-04-14
 
 ### 🚀 Features
