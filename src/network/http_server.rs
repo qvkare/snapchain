@@ -486,7 +486,7 @@ pub struct UserNameProof {
     #[serde(with = "serdebase64")]
     pub signature: Vec<u8>,
     pub fid: u64,
-    pub r#type: i32,
+    pub r#type: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1738,6 +1738,7 @@ impl HubHttpService for HubHttpServiceImpl {
                 error_detail: Some(e.to_string()),
             })?;
         let proof = response.into_inner();
+        let proof_type = proof.r#type().as_str_name().to_owned();
         Ok(UserNameProof {
             timestamp: proof.timestamp,
             name: std::str::from_utf8(&proof.name.as_slice())
@@ -1746,7 +1747,7 @@ impl HubHttpService for HubHttpServiceImpl {
             owner: format!("0x{}", hex::encode(&proof.owner)),
             signature: proof.signature,
             fid: proof.fid,
-            r#type: proof.r#type,
+            r#type: proof_type,
         })
     }
 
@@ -1780,7 +1781,7 @@ impl HubHttpService for HubHttpServiceImpl {
                     owner: format!("0x{}", hex::encode(&p.owner)),
                     signature: p.signature.clone(),
                     fid: p.fid,
-                    r#type: p.r#type,
+                    r#type: p.r#type().as_str_name().to_owned(),
                 })
                 .collect(),
         })
