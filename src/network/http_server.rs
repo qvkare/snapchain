@@ -298,50 +298,60 @@ pub struct ShardInfo {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FidRequest {
     pub fid: u64,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     pub page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
-    #[serde(rename = "startTimestamp", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "startTimestamp",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub start_timestamp: Option<u64>,
-    #[serde(rename = "stopTimestamp", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "stopTimestamp",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub stop_timestamp: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CastsByParentRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fid: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     pub page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionRequest {
     fid: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     target_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     target_fid: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     target_hash: Option<String>,
     reaction_type: ReactionType,
 }
@@ -350,54 +360,57 @@ pub struct ReactionRequest {
 pub struct ReactionsByFidRequest {
     fid: u64,
     reaction_type: ReactionType,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionsByCastRequest {
     pub target_fid: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reaction_type: Option<ReactionType>,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     pub page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionsByTargetRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_cast_id: Option<CastId>,
-    #[serde(rename = "url", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "url", skip_serializing_if = "Option::is_none")]
     pub target_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reaction_type: Option<ReactionType>,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     pub page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
 }
 
@@ -405,42 +418,44 @@ pub struct ReactionsByTargetRequest {
 pub struct LinkRequest {
     fid: u64,
     link_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     target_fid: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LinksByFidRequest {
     fid: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     link_type: Option<String>,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LinksByTargetRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     target_fid: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     link_type: Option<String>,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
 }
 
@@ -620,15 +635,16 @@ pub struct OnChainEventResponse {
 pub struct OnChainEventRequest {
     fid: u64,
     event_type: OnChainEventType,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
 }
 
