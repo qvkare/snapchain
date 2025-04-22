@@ -2,6 +2,7 @@ use informalsystems_malachitebft_config::ValueSyncConfig;
 use informalsystems_malachitebft_engine::network::NetworkRef;
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::collections::BTreeMap;
+use std::time::Duration;
 use tracing::Span;
 
 use crate::consensus::consensus::{Config, SystemMessage};
@@ -102,11 +103,15 @@ impl MalachiteReadNodeActors {
         let network_actor = spawn_network_actor(gossip_tx.clone(), local_peer_id).await?;
         let host_actor =
             spawn_read_host(shard_id, statsd_client, engine, system_tx, config).await?;
+        let sync_config = ValueSyncConfig {
+            request_timeout: Duration::from_secs(1),
+            ..ValueSyncConfig::default()
+        };
         let sync_actor = spawn_read_sync_actor(
             ctx.clone(),
             network_actor.clone(),
             host_actor.clone(),
-            ValueSyncConfig::default(),
+            sync_config,
             registry,
             span.clone(),
         )
