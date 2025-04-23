@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.10] - 2025-04-23
+
+### 🐛 Bug Fixes
+
+- Increase output port capacity so we don't lose messages (#426)
+- Increase sync timeout and let read nodes connect to more validators (#429)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add logging for sync (#428)
+- Add more logging for sync (#430)
+
 ## [0.2.9] - 2025-04-22
 
 ### 🐛 Bug Fixes
