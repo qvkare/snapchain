@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.11] - 2025-04-25
+
+### 🐛 Bug Fixes
+
+- Tune gossip params (#433)
+- Make the sleep in consensus critical path async (#436)
+- Read nodes only attempt sync against connected peers (#446)
+
 ## [0.2.10] - 2025-04-23
 
 ### 🐛 Bug Fixes
