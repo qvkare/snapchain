@@ -454,6 +454,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_events() {
+        let (stores, _, _, service) = make_server(None).await;
+
+        // Write some test events to the DB
+        write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 10).await;
+
+        // Test getting first page
+        let request = Request::new(proto::EventsRequest {
+            start_id: 0,
+            shard_index: None,
+            stop_id: None,
+            page_size: Some(3),
+            page_token: None,
+            reverse: None,
+        });
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 3);
+        let next_page_token = response.get_ref().next_page_token.clone();
+
+        // Test getting second page
+        let request = Request::new(proto::EventsRequest {
+            start_id: 0,
+            shard_index: None,
+            stop_id: None,
+            page_size: Some(3),
+            page_token: next_page_token,
+            reverse: None,
+        });
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 3);
+
+        // Test getting from only one shard
+        let request = Request::new(proto::EventsRequest {
+            start_id: 0,
+            shard_index: Some(2),
+            stop_id: None,
+            page_size: Some(3),
+            page_token: None,
+            reverse: None,
+        });
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 0); // No events in shard 2
+
+        // Test with start_id and stop_id with reverse pagination, on shard 1
+        let request = Request::new(proto::EventsRequest {
+            start_id: 2,
+            shard_index: Some(1),
+            stop_id: Some(8),
+            page_size: Some(7),
+            page_token: None,
+            reverse: Some(true),
+        });
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 6);
+        assert_eq!(events[0].id, 7);
+        assert_eq!(events[events.len() - 1].id, 2);
+        assert!(events[0].shard_index > 0);
+    }
+
+    #[tokio::test]
     async fn test_submit_message_fails_with_error_for_invalid_messages() {
         let (_stores, _senders, [mut engine1, _], service) = make_server(None).await;
 
