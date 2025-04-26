@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.12] - 2025-04-26
+
+### 🐛 Bug Fixes
+
+- Return empty `nextPageToken` for `PagedResponse` (#421)
+- Make reaction type optional for `get_reactions_by_target` (#431)
+- Implement /v1/events HTTP API endpoint (#451)
+
 ## [0.2.11] - 2025-04-25
 
 ### 🐛 Bug Fixes
