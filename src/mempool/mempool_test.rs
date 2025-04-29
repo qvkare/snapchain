@@ -118,10 +118,10 @@ mod tests {
         .await;
         let cast = create_cast_add(1234, "hello", None, None);
         let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
-        assert!(valid);
+        assert!(valid.is_ok());
         test_helper::commit_message(&mut engine, &cast).await;
         let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
-        assert!(!valid)
+        assert!(!valid.is_ok())
     }
 
     #[tokio::test]
@@ -132,13 +132,13 @@ mod tests {
             on_chain_event: Some(onchain_event.clone()),
             fname_transfer: None,
         }));
-        assert!(valid);
+        assert!(valid.is_ok());
         test_helper::commit_event(&mut engine, &onchain_event).await;
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: Some(onchain_event.clone()),
             fname_transfer: None,
         }));
-        assert!(!valid)
+        assert!(!valid.is_ok())
     }
 
     #[tokio::test]
@@ -167,13 +167,13 @@ mod tests {
             on_chain_event: None,
             fname_transfer: Some(fname_transfer.clone()),
         }));
-        assert!(valid);
+        assert!(valid.is_ok());
         test_helper::commit_fname_transfer(&mut engine, &fname_transfer).await;
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: None,
             fname_transfer: Some(fname_transfer),
         }));
-        assert!(!valid)
+        assert!(!valid.is_ok())
     }
 
     #[tokio::test]
@@ -197,13 +197,13 @@ mod tests {
 
         let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
         let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
-        assert!(!valid);
+        assert!(!valid.is_ok());
 
         commit_event(&mut engine, &default_storage_event(FID_FOR_TEST)).await;
 
         let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
         let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
-        assert!(valid);
+        assert!(valid.is_ok());
     }
 
     #[tokio::test]
@@ -223,6 +223,7 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(create_cast_add(123, "hello", None, None)),
                 MempoolSource::Local,
+                None,
             ))
             .await
             .unwrap();
@@ -230,6 +231,7 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(create_cast_add(435, "hello2", None, None)),
                 MempoolSource::Local,
+                None,
             ))
             .await
             .unwrap();
@@ -266,6 +268,7 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast.clone()),
                 MempoolSource::Local,
+                None,
             ))
             .await
             .unwrap();
@@ -277,6 +280,7 @@ mod tests {
                     fname_transfer: None,
                 }),
                 MempoolSource::Local,
+                None,
             ))
             .await
             .unwrap();
@@ -343,12 +347,14 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast1.clone()),
                 MempoolSource::Local,
+                None,
             ))
             .await;
         let _ = mempool_tx
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast2),
                 MempoolSource::Local,
+                None,
             ))
             .await;
 
@@ -453,6 +459,7 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast.clone()),
                 MempoolSource::Local,
+                None,
             ))
             .await
             .unwrap();
@@ -462,6 +469,7 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast),
                 MempoolSource::Local,
+                None,
             ))
             .await
             .unwrap();
@@ -471,6 +479,7 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast2),
                 MempoolSource::Gossip,
+                None,
             ))
             .await
             .unwrap();
@@ -508,5 +517,43 @@ mod tests {
         let result = mempool_retrieval_rx.await.unwrap();
         assert_eq!(result.len(), 1); // Only the first cast should be received
         assert_eq!(result[0].fid(), 1234);
+    }
+
+    #[tokio::test]
+    async fn test_mempool_error() {
+        let (mut engine, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) =
+            setup(None, false).await;
+
+        test_helper::register_user(
+            1234,
+            default_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let message = create_cast_add(1234, "hello", None, None);
+
+        test_helper::commit_message(&mut engine, &message.clone()).await;
+
+        let (req, res) = oneshot::channel();
+
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(message),
+                MempoolSource::Local,
+                Some(req),
+            ))
+            .await
+            .unwrap();
+
+        let result = res.await.unwrap();
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "bad_request.duplicate");
     }
 }

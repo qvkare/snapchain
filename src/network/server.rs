@@ -75,6 +75,7 @@ use tonic::metadata::AsciiMetadataValue;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 
+const MEMPOOL_ADD_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 const MEMPOOL_SIZE_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub struct MyHubService {
@@ -227,9 +228,12 @@ impl MyHubService {
             }
         }
 
+        let (tx, rx) = oneshot::channel();
+
         match self.mempool_tx.try_send(MempoolRequest::AddMessage(
             MempoolMessage::UserMessage(message.clone()),
             MempoolSource::RPC,
+            Some(tx),
         )) {
             Ok(_) => {
                 self.statsd_client.count("rpc.submit_message.success", 1);
@@ -249,7 +253,25 @@ impl MyHubService {
             }
         }
 
-        Ok(message)
+        let result = match timeout(MEMPOOL_ADD_REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(err)) => {
+                error!(
+                    "Error receiving message from mempool channel: {:?}",
+                    err.to_string()
+                );
+                return Err(HubError::unavailable("Error adding to mempool"));
+            }
+            Err(_) => {
+                error!("Timeout receiving message from mempool channel",);
+                return Err(HubError::unavailable("Error adding to mempool"));
+            }
+        };
+
+        return match result {
+            Ok(_) => Ok(message),
+            Err(hub_error) => Err(hub_error),
+        };
     }
 
     fn get_stores_for_shard(&self, shard_id: u32) -> Result<&Stores, Status> {

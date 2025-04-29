@@ -10,6 +10,7 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::core::error::HubError;
 use crate::core::util::farcaster_time_to_unix_seconds;
 use crate::proto::OnChainEventType;
 use crate::{
@@ -209,7 +210,11 @@ pub enum MempoolSource {
 
 #[derive(Debug)]
 pub enum MempoolRequest {
-    AddMessage(MempoolMessage, MempoolSource),
+    AddMessage(
+        MempoolMessage,
+        MempoolSource,
+        Option<oneshot::Sender<Result<(), HubError>>>,
+    ),
     GetSize(oneshot::Sender<HashMap<u32, u64>>),
 }
 
@@ -343,25 +348,31 @@ impl ReadNodeMempool {
         }
     }
 
-    fn message_is_valid(&mut self, message: &MempoolMessage) -> bool {
+    fn message_is_valid(&mut self, message: &MempoolMessage) -> Result<(), HubError> {
         let fid = message.fid();
         let shard = self.message_router.route_fid(fid, self.num_shards);
         if self.message_already_exists(shard, message) {
-            return false;
+            return Err(HubError::duplicate("message has already been merged"));
         }
-        true
+        Ok(())
     }
 
     pub async fn run(&mut self) {
         while let Some(message_request) = self.mempool_rx.recv().await {
             match message_request {
-                MempoolRequest::AddMessage(message, source) => {
+                MempoolRequest::AddMessage(message, source, reply_to) => {
                     self.statsd_client
                         .count("read_mempool.messages_received", 1);
-                    if self.message_is_valid(&message) {
+                    let result = self.message_is_valid(&message);
+                    if result.is_ok() {
                         self.gossip_message(message, source).await;
                         self.statsd_client
                             .count("read_mempool.messages_published", 1);
+                    }
+                    if let Some(sender) = reply_to {
+                        if let Err(_) = sender.send(result) {
+                            error!("Unable to reply to add message request from mempool");
+                        }
                     }
                 }
                 MempoolRequest::GetSize(reply_to) => {
@@ -450,7 +461,8 @@ impl Mempool {
                     match shard_messages.pop_first() {
                         None => break,
                         Some((_, next_message)) => {
-                            if self.message_is_valid(&next_message) {
+                            let result = self.message_is_valid(&next_message);
+                            if result.is_ok() {
                                 messages.push(next_message);
                             }
                         }
@@ -464,24 +476,28 @@ impl Mempool {
         }
     }
 
-    pub fn message_is_valid(&mut self, message: &MempoolMessage) -> bool {
+    pub fn message_is_valid(&mut self, message: &MempoolMessage) -> Result<(), HubError> {
         let shard = self
             .read_node_mempool
             .message_router
             .route_fid(message.fid(), self.read_node_mempool.num_shards);
 
         if self.message_already_exists(shard, message) {
-            return false;
+            return Err(HubError::duplicate("message has already been merged"));
         }
         if self.message_exceeds_rate_limits(shard, message) {
             self.statsd_client
                 .count_with_shard(shard, "mempool.rate_limit_hit", 1);
-            return false;
+            return Err(HubError::rate_limited("Rate limit exceeded"));
         }
-        true
+        Ok(())
     }
 
-    async fn insert(&mut self, message: MempoolMessage, source: MempoolSource) {
+    async fn insert(
+        &mut self,
+        message: MempoolMessage,
+        source: MempoolSource,
+    ) -> Result<(), HubError> {
         let fid = message.fid();
         let shard_id = self
             .read_node_mempool
@@ -492,14 +508,15 @@ impl Mempool {
             Some(shard_messages) => {
                 if shard_messages.contains_key(&message.mempool_key()) {
                     // Exit early if the message already exists in the mempool
-                    return;
+                    return Err(HubError::duplicate("message already in the mempool"));
                 }
             }
             None => {}
         }
 
         // TODO(aditi): Maybe we don't need to run validations here?
-        if self.message_is_valid(&message) {
+        let result = self.message_is_valid(&message);
+        if result.is_ok() {
             match self.messages.get_mut(&shard_id) {
                 None => {
                     let mut messages = BTreeMap::new();
@@ -525,6 +542,8 @@ impl Mempool {
         } else {
             self.statsd_client.count("mempool.insert.failure", 1);
         }
+
+        result
     }
 
     pub async fn run(&mut self) {
@@ -579,8 +598,13 @@ impl Mempool {
                     for _ in 0..256 {
                         if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
                             match self.read_node_mempool.mempool_rx.try_recv() {
-                                Ok(MempoolRequest::AddMessage(message, source)) => {
-                                    self.insert(message, source).await;
+                                Ok(MempoolRequest::AddMessage(message, source, reply_to)) => {
+                                    let result = self.insert(message, source).await;
+                                    if let Some(sender) = reply_to {
+                                        if let Err(_) = sender.send(result) {
+                                            error!("Unable to reply to add message request from mempool");
+                                        }
+                                    }
                                 }
                                 Ok(MempoolRequest::GetSize(reply_to)) => {
                                     let mut sizes = HashMap::new();
