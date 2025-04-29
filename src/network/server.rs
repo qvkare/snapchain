@@ -667,6 +667,34 @@ impl HubService for MyHubService {
         }))
     }
 
+    async fn get_fids(
+        &self,
+        request: Request<FidsRequest>,
+    ) -> Result<Response<proto::FidsResponse>, Status> {
+        let inner_request = request.into_inner();
+
+        let stores = self.get_stores_for_shard(inner_request.shard_id)?;
+
+        let page_options = PageOptions {
+            page_size: inner_request.page_size.map(|s| s as usize),
+            page_token: inner_request.page_token,
+            reverse: inner_request.reverse.unwrap_or(false),
+        };
+
+        let (fids, raw_next_page_token) = stores
+            .onchain_event_store
+            .get_fids(&page_options)
+            .unwrap_or((vec![], None));
+
+        let next_page_token = serde_json::to_vec(&raw_next_page_token)
+            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+
+        Ok(Response::new(FidsResponse {
+            fids,
+            next_page_token: Some(next_page_token),
+        }))
+    }
+
     type SubscribeStream = ReceiverStream<Result<HubEvent, Status>>;
 
     async fn subscribe(
@@ -1666,10 +1694,6 @@ impl HubService for MyHubService {
         &self,
         _: Request<IdRegistryEventByAddressRequest>,
     ) -> Result<Response<OnChainEvent>, Status> {
-        Err(Status::internal("method not supported".to_string()))
-    }
-
-    async fn get_fids(&self, _: Request<FidsRequest>) -> Result<Response<FidsResponse>, Status> {
         Err(Status::internal("method not supported".to_string()))
     }
 
