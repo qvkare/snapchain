@@ -6,8 +6,8 @@ mod tests {
     use prost::Message;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::time::timeout;
+    use std::time::{Duration, Instant};
+    use tokio::time::{sleep, timeout};
 
     use crate::connectors::onchain_events::L1Client;
     use crate::core::validations::{self, verification::VerificationAddressClaim};
@@ -17,12 +17,12 @@ mod tests {
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
-        self, HubEvent, HubEventType, UserNameProof, UserNameType, UsernameProofRequest,
-        VerificationAddAddressBody,
+        self, EventRequest, EventsRequest, HubEvent, HubEventType, ShardChunk, UserNameProof,
+        UserNameType, UsernameProofRequest, VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{self, RocksDB, RocksDbTransactionBatch};
-    use crate::storage::store::account::SEQUENCE_BITS;
+    use crate::storage::store::account::{HubEventIdGenerator, SEQUENCE_BITS};
     use crate::storage::store::engine::{Senders, ShardEngine};
     use crate::storage::store::stores::Stores;
     use crate::storage::store::test_helper::register_user;
@@ -122,6 +122,7 @@ mod tests {
                     body: None,
                     block_number: 1,
                     shard_index: 1,
+                    timestamp: 0,
                 })
                 .unwrap();
         }
@@ -138,6 +139,7 @@ mod tests {
                     body: None,
                     block_number: 1,
                     shard_index: 1,
+                    timestamp: 0,
                 },
             )
             .unwrap();
@@ -199,7 +201,7 @@ mod tests {
             limits.clone(),
             test_helper::statsd_client(),
         );
-        let shard1_senders = Senders::new();
+        let shard1_senders = engine1.get_senders();
 
         let shard2_stores = Stores::new(
             db2,
@@ -208,7 +210,7 @@ mod tests {
             limits.clone(),
             test_helper::statsd_client(),
         );
-        let shard2_senders = Senders::new();
+        let shard2_senders = engine2.get_senders();
         let stores = HashMap::from([(1, shard1_stores), (2, shard2_stores)]);
         let senders = HashMap::from([(1, shard1_senders), (2, shard2_senders)]);
         let num_shards = senders.len() as u32;
@@ -372,6 +374,7 @@ mod tests {
             body: None,
             block_number: 0,
             shard_index: 0,
+            timestamp: 0,
         };
 
         let db = stores.get(&1u32).unwrap().shard_store.db.clone();
@@ -607,6 +610,114 @@ mod tests {
         assert_eq!(
             response.message(),
             "bad_request.validation_failure/unknown fid"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_event_timestamp() {
+        let (_stores, _senders, [mut engine1, _], service) = make_server(None).await;
+
+        test_helper::register_user(
+            SHARD1_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+        let cast_add = messages_factory::casts::create_cast_add(SHARD1_FID, "test", None, None);
+        let cast_add2 = messages_factory::casts::create_cast_add(SHARD1_FID, "test2", None, None);
+        let mut shard_chunks = vec![];
+
+        shard_chunks
+            .push(test_helper::commit_messages(&mut engine1, vec![cast_add, cast_add2]).await);
+
+        sleep(Duration::from_secs(1)).await;
+
+        let cast_add3 = messages_factory::casts::create_cast_add(SHARD1_FID, "test3", None, None);
+
+        shard_chunks.push(test_helper::commit_message(&mut engine1, &cast_add3).await);
+
+        let request = Request::new(SubscribeRequest {
+            event_types: vec![HubEventType::MergeMessage as i32],
+            from_id: Some(0),
+            shard_index: Some(1),
+        });
+        let mut listener = service.subscribe(request).await.unwrap();
+
+        let mut events = vec![];
+        let start_time = Instant::now();
+        loop {
+            if start_time.elapsed() > Duration::from_secs(2) {
+                break;
+            }
+
+            let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
+            if let Ok(Some(Ok(hub_event))) = event {
+                assert_ne!(hub_event.timestamp, 0);
+                events.push(hub_event);
+            }
+        }
+
+        let cast_add4 = messages_factory::casts::create_cast_add(SHARD1_FID, "test4", None, None);
+
+        shard_chunks.push(test_helper::commit_message(&mut engine1, &cast_add4).await);
+
+        let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
+        if let Ok(Some(Ok(hub_event))) = event {
+            assert_ne!(hub_event.timestamp, 0);
+            events.push(hub_event);
+        }
+
+        let assert_events = |events: &Vec<HubEvent>, shard_chunks: &Vec<ShardChunk>| {
+            assert_eq!(events.len(), 4);
+            assert_eq!(shard_chunks.len(), 3);
+            assert_eq!(
+                events[0].timestamp,
+                shard_chunks[0].header.as_ref().unwrap().timestamp
+            );
+            assert_eq!(
+                events[1].timestamp,
+                shard_chunks[0].header.as_ref().unwrap().timestamp
+            );
+            assert_eq!(
+                events[2].timestamp,
+                shard_chunks[1].header.as_ref().unwrap().timestamp
+            );
+            assert_eq!(
+                events[3].timestamp,
+                shard_chunks[2].header.as_ref().unwrap().timestamp
+            );
+        };
+        assert_events(&events, &shard_chunks);
+
+        let req = Request::new(EventsRequest {
+            start_id: events[0].id,
+            stop_id: None,
+            shard_index: Some(1),
+            page_size: None,
+            page_token: None,
+            reverse: None,
+        });
+        let res = service.get_events(req).await.unwrap();
+        assert_events(&res.into_inner().events, &shard_chunks);
+
+        let req = Request::new(EventRequest {
+            shard_index: 1,
+            id: HubEventIdGenerator::make_event_id(
+                shard_chunks[2]
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .height
+                    .unwrap()
+                    .block_number,
+                0,
+            ),
+        });
+        let res = service.get_event(req).await.unwrap();
+        assert_eq!(
+            res.into_inner().timestamp,
+            shard_chunks[2].header.as_ref().unwrap().timestamp
         );
     }
 

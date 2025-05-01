@@ -6,9 +6,6 @@ use crate::core::validations;
 use crate::core::validations::verification::VerificationAddressClaim;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::mempool::routing;
-use crate::proto;
-use crate::proto::cast_add_body;
-use crate::proto::casts_by_parent_request;
 use crate::proto::hub_service_server::HubService;
 use crate::proto::link_body;
 use crate::proto::links_by_target_request;
@@ -38,6 +35,9 @@ use crate::proto::UsernameProofRequest;
 use crate::proto::UsernameProofsResponse;
 use crate::proto::ValidationResponse;
 use crate::proto::VerificationAddAddressBody;
+use crate::proto::{self};
+use crate::proto::{cast_add_body, Height};
+use crate::proto::{casts_by_parent_request, ShardChunk};
 use crate::proto::{Block, CastId, DbStats};
 use crate::proto::{
     BlocksRequest, EventRequest, EventsRequest, EventsResponse, ShardChunksRequest,
@@ -415,10 +415,17 @@ impl MyHubService {
         }
     }
 
-    fn rewrite_hub_event(mut hub_event: HubEvent, shard_index: u32) -> HubEvent {
+    fn rewrite_hub_event(
+        mut hub_event: HubEvent,
+        shard_index: u32,
+        timestamp: Option<u64>,
+    ) -> HubEvent {
         let (block_number, _) = HubEventIdGenerator::extract_height_and_seq(hub_event.id);
         hub_event.block_number = block_number;
         hub_event.shard_index = shard_index;
+        if let Some(timestamp) = timestamp {
+            hub_event.timestamp = timestamp;
+        }
 
         match &mut hub_event.body {
             Some(body) => {
@@ -441,6 +448,54 @@ impl MyHubService {
             None => {}
         };
         hub_event
+    }
+
+    fn get_events_from_store(
+        stores: &Stores,
+        start_id: u64,
+        stop_id: Option<u64>,
+        page_options: Option<PageOptions>,
+        last_chunk: Option<ShardChunk>,
+    ) -> (EventsPage, Option<ShardChunk>) {
+        let mut events = vec![];
+        let old_events = stores.get_events(start_id, stop_id, page_options).unwrap();
+        let mut last_chunk = last_chunk;
+
+        for event in old_events.events {
+            let (block_number, _) = HubEventIdGenerator::extract_height_and_seq(event.id);
+            if last_chunk
+                .as_ref()
+                .map(|chunk| {
+                    return block_number
+                        != chunk.header.as_ref().unwrap().height.unwrap().block_number;
+                })
+                .unwrap_or(true)
+            {
+                let chunk = stores.shard_store.get_chunk_by_height(
+                    Height {
+                        shard_index: stores.shard_id,
+                        block_number,
+                    }
+                    .as_u64(),
+                );
+                last_chunk = chunk.unwrap_or(None);
+            }
+            let event = Self::rewrite_hub_event(
+                event,
+                stores.shard_id,
+                last_chunk
+                    .as_ref()
+                    .map(|chunk| chunk.header.as_ref().unwrap().timestamp),
+            );
+            events.push(event)
+        }
+        (
+            EventsPage {
+                events,
+                next_page_token: old_events.next_page_token,
+            },
+            last_chunk,
+        )
     }
 }
 
@@ -718,7 +773,6 @@ impl HubService for MyHubService {
     }
 
     type SubscribeStream = ReceiverStream<Result<HubEvent, Status>>;
-
     async fn subscribe(
         &self,
         request: Request<SubscribeRequest>,
@@ -774,22 +828,24 @@ impl HubService for MyHubService {
                         "[subscribe] Replaying old events for shard {}",
                         store.shard_id
                     );
+                    let mut last_chunk: Option<ShardChunk> = None;
                     loop {
-                        let old_events = store
-                            .get_events(
-                                start_id,
-                                None,
-                                Some(PageOptions {
-                                    page_token: page_token.clone(),
-                                    page_size: None,
-                                    reverse: false,
-                                }),
-                            )
-                            .unwrap();
+                        let (old_events, chunk) = Self::get_events_from_store(
+                            &store,
+                            start_id,
+                            None,
+                            Some(PageOptions {
+                                page_token: page_token.clone(),
+                                page_size: None,
+                                reverse: false,
+                            }),
+                            last_chunk,
+                        );
+
+                        last_chunk = chunk;
 
                         for event in old_events.events {
                             if event_types.contains(&event.r#type) {
-                                let event = Self::rewrite_hub_event(event, store.shard_id);
                                 if let Err(_) = server_tx.send(Ok(event)).await {
                                     return;
                                 }
@@ -822,7 +878,8 @@ impl HubService for MyHubService {
                         match event_rx.recv().await {
                             Ok(hub_event) => {
                                 if filtered_events.contains(&hub_event.r#type) {
-                                    let hub_event = Self::rewrite_hub_event(hub_event, shard_id);
+                                    let hub_event =
+                                        Self::rewrite_hub_event(hub_event, shard_id, None);
                                     match tx.send(Ok(hub_event)).await {
                                         Ok(_) => {}
                                         Err(_) => {
@@ -859,8 +916,24 @@ impl HubService for MyHubService {
 
         match hub_event_result {
             Ok(hub_event) => {
-                let response = Self::rewrite_hub_event(hub_event, stores.shard_id);
-                Ok(Response::new(response))
+                let (block_number, _) = HubEventIdGenerator::extract_height_and_seq(hub_event.id);
+                let chunk = stores.shard_store.get_chunk_by_height(
+                    Height {
+                        shard_index: stores.shard_id,
+                        block_number,
+                    }
+                    .as_u64(),
+                );
+                let hub_event = Self::rewrite_hub_event(
+                    hub_event,
+                    stores.shard_id,
+                    chunk
+                        .unwrap_or(None)
+                        .as_ref()
+                        .map(|chunk| chunk.header.as_ref().unwrap().timestamp),
+                );
+
+                Ok(Response::new(hub_event))
             }
             Err(err) => Err(Status::internal(err.to_string())),
         }
@@ -909,20 +982,14 @@ impl HubService for MyHubService {
                     page_token: shard_token,
                     reverse: req.reverse.unwrap_or(false),
                 };
-                let raw_result = store
-                    .get_events(req.start_id, req.stop_id, Some(page_options))
-                    .unwrap_or(EventsPage {
-                        events: vec![],
-                        next_page_token: None,
-                    });
-                EventsPage {
-                    events: raw_result
-                        .events
-                        .into_iter()
-                        .map(|event| Self::rewrite_hub_event(event, store.shard_id))
-                        .collect(),
-                    next_page_token: raw_result.next_page_token,
-                }
+                let (events, _) = Self::get_events_from_store(
+                    store,
+                    req.start_id,
+                    req.stop_id,
+                    Some(page_options),
+                    None,
+                );
+                events
             })
             .collect();
         let combined_events: Vec<HubEvent> =
