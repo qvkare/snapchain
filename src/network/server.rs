@@ -65,6 +65,8 @@ use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use hex::ToHex;
+use moka::policy::EvictionPolicy;
+use moka::sync::{Cache, CacheBuilder};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
@@ -91,6 +93,7 @@ pub struct MyHubService {
     network: proto::FarcasterNetwork,
     version: String,
     peer_id: String,
+    id_registry_cache: Cache<Vec<u8>, OnChainEvent>,
 }
 
 impl MyHubService {
@@ -122,6 +125,11 @@ impl MyHubService {
             info!("RPC server auth enabled with {} users", allowed_users.len());
         }
 
+        let id_registry_cache = CacheBuilder::new(2_000_000)
+            .time_to_idle(Duration::from_secs(60 * 60))
+            .eviction_policy(EvictionPolicy::lru())
+            .build();
+
         let service = Self {
             allowed_users,
             network,
@@ -135,6 +143,7 @@ impl MyHubService {
             mempool_tx,
             version,
             peer_id,
+            id_registry_cache,
         };
         service
     }
@@ -1717,7 +1726,7 @@ impl HubService for MyHubService {
         for (_shard_id, stores) in &self.shard_stores {
             let events = stores
                 .onchain_event_store
-                .get_onchain_events(event_type, fid)
+                .get_onchain_events(event_type, Some(fid))
                 .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
             combined_events.extend(events);
         }
@@ -1743,7 +1752,7 @@ impl HubService for MyHubService {
         for (_shard_id, stores) in &self.shard_stores {
             let events = stores
                 .onchain_event_store
-                .get_onchain_events(event_type, fid)
+                .get_onchain_events(event_type, Some(fid))
                 .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
             combined_events.extend(events);
         }
@@ -1781,9 +1790,36 @@ impl HubService for MyHubService {
 
     async fn get_id_registry_on_chain_event_by_address(
         &self,
-        _: Request<IdRegistryEventByAddressRequest>,
+        request: Request<IdRegistryEventByAddressRequest>,
     ) -> Result<Response<OnChainEvent>, Status> {
-        Err(Status::internal("method not supported".to_string()))
+        let address = request.into_inner().address;
+
+        if let Some(evt) = self.id_registry_cache.get(&address) {
+            return Ok(Response::new(evt.clone()));
+        }
+
+        for store in self.shard_stores.values() {
+            let events = store
+                .onchain_event_store
+                .get_onchain_events(proto::OnChainEventType::EventTypeIdRegister, None)
+                .map_err(|_| {
+                    Status::internal("on chain event store iterator not found for EventType")
+                    // Is this the correct error and hows the string look?
+                })?;
+
+            for evt in events {
+                if let Some(Body::IdRegisterEventBody(body)) = &evt.body {
+                    let key = &body.to;
+                    self.id_registry_cache.insert(key.clone(), evt.clone());
+                    // return here so we don't have to iterate through everything
+                    if *key == address {
+                        return Ok(Response::new(evt.clone()));
+                    }
+                }
+            }
+        }
+        // If we reach here, we didn't find the event so error out
+        Err(Status::not_found("no id-registry event for address"))
     }
 
     async fn get_links_by_target(

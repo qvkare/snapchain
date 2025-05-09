@@ -399,7 +399,7 @@ impl OnchainEventStore {
     pub fn get_onchain_events(
         &self,
         event_type: OnChainEventType,
-        fid: u64,
+        fid: Option<u64>,
     ) -> Result<Vec<OnChainEvent>, OnchainEventStorageError> {
         let mut onchain_events = vec![];
         let mut next_page_token = None;
@@ -412,7 +412,7 @@ impl OnchainEventStore {
                     reverse: false,
                 },
                 event_type,
-                Some(fid),
+                fid,
             )?;
             onchain_events.extend(onchain_events_page.onchain_events);
             if onchain_events_page.next_page_token.is_none() {
@@ -481,7 +481,8 @@ impl OnchainEventStore {
         &self,
         fid: u64,
     ) -> Result<StorageSlot, OnchainEventStorageError> {
-        let rent_events = self.get_onchain_events(OnChainEventType::EventTypeStorageRent, fid)?;
+        let rent_events =
+            self.get_onchain_events(OnChainEventType::EventTypeStorageRent, Some(fid))?;
         let mut storage_slot = StorageSlot::new(0, 0, 0);
         for rent_event in rent_events {
             storage_slot.merge(&StorageSlot::from_event(&rent_event)?);
