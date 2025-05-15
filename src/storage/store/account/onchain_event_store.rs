@@ -164,7 +164,7 @@ fn build_secondary_indices_for_signer(
     if signer_event_body.event_type() == SignerEventType::AdminReset {
         let mut next_page_token = None;
         loop {
-            let events_page = get_onchain_events(
+            let events_page = get_onchain_events::<fn(&OnChainEvent) -> bool>(
                 db,
                 &PageOptions {
                     page_size: None,
@@ -173,6 +173,7 @@ fn build_secondary_indices_for_signer(
                 },
                 OnChainEventType::EventTypeSigner,
                 Some(onchain_event.fid),
+                None,
             )?;
 
             let onchain_event = events_page.onchain_events.into_iter().find(|event| {
@@ -251,12 +252,16 @@ fn get_event_by_secondary_key(
     }
 }
 
-pub fn get_onchain_events(
+pub fn get_onchain_events<F>(
     db: &RocksDB,
     page_options: &PageOptions,
     event_type: OnChainEventType,
     fid: Option<u64>,
-) -> Result<OnchainEventsPage, OnchainEventStorageError> {
+    filter: Option<F>,
+) -> Result<OnchainEventsPage, OnchainEventStorageError>
+where
+    F: Fn(&OnChainEvent) -> bool,
+{
     let mut start_prefix = make_onchain_event_type_prefix(event_type);
 
     if let Some(fid) = &fid {
@@ -273,11 +278,16 @@ pub fn get_onchain_events(
         page_options,
         |key, value| {
             let onchain_event = OnChainEvent::decode(value).map_err(|e| HubError::from(e))?;
-            onchain_events.push(onchain_event);
+            if filter
+                .as_ref()
+                .map_or(true, |filter| filter(&onchain_event))
+            {
+                onchain_events.push(onchain_event);
 
-            if onchain_events.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
-                last_key = key.to_vec();
-                return Ok(true); // Stop iterating
+                if onchain_events.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
+                    last_key = key.to_vec();
+                    return Ok(true); // Stop iterating
+                }
             }
 
             Ok(false) // Continue iterating
@@ -404,7 +414,7 @@ impl OnchainEventStore {
         let mut onchain_events = vec![];
         let mut next_page_token = None;
         loop {
-            let onchain_events_page = get_onchain_events(
+            let onchain_events_page = get_onchain_events::<fn(&OnChainEvent) -> bool>(
                 &self.db,
                 &PageOptions {
                     page_size: Some(PAGE_SIZE),
@@ -413,6 +423,7 @@ impl OnchainEventStore {
                 },
                 event_type,
                 fid,
+                None,
             )?;
             onchain_events.extend(onchain_events_page.onchain_events);
             if onchain_events_page.next_page_token.is_none() {
@@ -425,14 +436,41 @@ impl OnchainEventStore {
         Ok(onchain_events)
     }
 
+    pub fn is_signer_key(signer_event_body: &SignerEventBody) -> bool {
+        signer_event_body.key_type == SUPPORTED_SIGNER_KEY_TYPE
+    }
+
+    pub fn get_signers(
+        &self,
+        fid: Option<u64>,
+        page_options: &PageOptions,
+    ) -> Result<OnchainEventsPage, OnchainEventStorageError> {
+        get_onchain_events(
+            &self.db,
+            &page_options,
+            OnChainEventType::EventTypeSigner,
+            fid,
+            Some(|onchain_event: &OnChainEvent| match &onchain_event.body {
+                None => false,
+                Some(body) => match body {
+                    on_chain_event::Body::SignerEventBody(signer_event_body) => {
+                        Self::is_signer_key(signer_event_body)
+                    }
+                    _ => false,
+                },
+            }),
+        )
+    }
+
     pub fn get_fids(
         &self,
         page_options: &PageOptions,
     ) -> Result<(Vec<u64>, Option<Vec<u8>>), OnchainEventStorageError> {
-        let onchain_events_page = get_onchain_events(
+        let onchain_events_page = get_onchain_events::<fn(&OnChainEvent) -> bool>(
             &self.db,
             page_options,
             OnChainEventType::EventTypeIdRegister,
+            None,
             None,
         )?;
 
