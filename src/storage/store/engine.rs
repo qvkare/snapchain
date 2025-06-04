@@ -7,7 +7,6 @@ use crate::core::validations;
 use crate::core::validations::verification;
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::UserNameProof;
-use crate::proto::UserNameType;
 use crate::proto::{self, Block, MessageType, ShardChunk, Transaction};
 use crate::proto::{FarcasterNetwork, HubEvent};
 use crate::proto::{OnChainEvent, OnChainEventType};
@@ -722,7 +721,7 @@ impl ShardEngine {
 
         for msg in &snapchain_txn.user_messages {
             // Errors are validated based on the shard root
-            match self.validate_user_message(msg, txn_batch) {
+            match self.validate_user_message(msg, txn_batch, &version) {
                 Ok(()) => {
                     let result = self.merge_message(msg, txn_batch);
                     match result {
@@ -764,7 +763,7 @@ impl ShardEngine {
 
         for msg_type in message_types {
             let fid = snapchain_txn.fid;
-            let result = self.prune_messages(fid, msg_type, txn_batch);
+            let result = self.prune_messages(fid, msg_type, txn_batch, &version);
             match result {
                 Ok(pruned_events) => {
                     for event in pruned_events {
@@ -874,6 +873,7 @@ impl ShardEngine {
         fid: u64,
         msg_type: MessageType,
         txn_batch: &mut RocksDbTransactionBatch,
+        version: &EngineVersion,
     ) -> Result<Vec<HubEvent>, EngineError> {
         let (current_count, max_count) = self
             .stores
@@ -906,6 +906,17 @@ impl ShardEngine {
                 .verification_store
                 .prune_messages(fid, current_count, max_count, txn_batch)
                 .map_err(|e| EngineError::StoreError(e)),
+            MessageType::UsernameProof => {
+                // Usernameproof pruning was missing before this version
+                if version.is_enabled(ProtocolFeature::EnsValidation) {
+                    let store = &self.stores.username_proof_store;
+                    store
+                        .prune_messages(fid, current_count, max_count, txn_batch)
+                        .map_err(|e| EngineError::StoreError(e))
+                } else {
+                    Ok(vec![])
+                }
+            }
             unhandled_type => {
                 return Err(EngineError::UnsupportedMessageType(unhandled_type));
             }
@@ -1038,6 +1049,7 @@ impl ShardEngine {
         &self,
         message: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
+        version: &EngineVersion,
     ) -> Result<(), MessageValidationError> {
         let now = std::time::Instant::now();
         // Ensure message data is present
@@ -1046,7 +1058,7 @@ impl ShardEngine {
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?;
 
-        validations::message::validate_message(message, self.network)?;
+        validations::message::validate_message(message, self.network, version)?;
 
         // Check that the user has a custody address
         self.stores
@@ -1087,7 +1099,6 @@ impl ShardEngine {
             let proof_message = UsernameProofStore::get_username_proof(
                 &self.stores.username_proof_store,
                 &name.as_bytes().to_vec(),
-                UserNameType::UsernameTypeEnsL1 as u8,
             )
             .map_err(|e| MessageValidationError::StoreError(e))?;
             match proof_message {

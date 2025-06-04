@@ -9,7 +9,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::time::{sleep, timeout};
 
-    use crate::connectors::onchain_events::L1Client;
+    use crate::connectors::onchain_events::{Chain, ChainAPI, ChainClients};
     use crate::core::validations::{self, verification::VerificationAddressClaim};
     use crate::mempool::mempool::{self, Mempool};
     use crate::mempool::routing;
@@ -18,7 +18,8 @@ mod tests {
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
         self, EventRequest, EventsRequest, HubEvent, HubEventType, OnChainEventType, ShardChunk,
-        UserNameProof, UserNameType, UsernameProofRequest, VerificationAddAddressBody,
+        UserDataType, UserNameProof, UserNameType, UsernameProofRequest,
+        VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{self, RocksDB, RocksDbTransactionBatch};
@@ -56,14 +57,17 @@ mod tests {
     struct MockL1Client {}
 
     #[async_trait]
-    impl L1Client for MockL1Client {
+    impl ChainAPI for MockL1Client {
         async fn resolve_ens_name(
             &self,
-            _name: String,
+            name: String,
         ) -> Result<alloy_primitives::Address, EnsError> {
-            let addr = alloy_primitives::Address::from_slice(
-                &hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
-            );
+            let address_str = match name.as_str() {
+                "username.eth" => "91031dcfdea024b4d51e775486111d2b2a715871",
+                "username.base.eth" => "849151d7D0bF1F34b70d5caD5149D28CC2308bf1",
+                _ => return Err(EnsError::ResolverNotFound(name)),
+            };
+            let addr = alloy_primitives::Address::from_slice(&hex::decode(address_str).unwrap());
             future::ready(Ok(addr)).await
         }
 
@@ -165,6 +169,15 @@ mod tests {
             .insert("authorization", auth.parse().unwrap());
     }
 
+    async fn submit_message(
+        service: &MyHubService,
+        message: proto::Message,
+    ) -> Result<tonic::Response<proto::Message>, tonic::Status> {
+        let mut request = Request::new(message);
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+        service.submit_message(request).await
+    }
+
     async fn make_server(
         rpc_auth: Option<String>,
     ) -> (
@@ -240,6 +253,17 @@ mod tests {
         );
         tokio::spawn(async move { mempool.run().await });
 
+        let mut chain_clients = ChainClients {
+            chain_api_map: HashMap::new(),
+        };
+        chain_clients.chain_api_map.insert(
+            Chain::EthMainnet,
+            Box::new(MockL1Client {}) as Box<dyn ChainAPI>,
+        );
+        chain_clients.chain_api_map.insert(
+            Chain::BaseMainnet,
+            Box::new(MockL1Client {}) as Box<dyn ChainAPI>,
+        );
         (
             stores.clone(),
             senders.clone(),
@@ -254,7 +278,7 @@ mod tests {
                 proto::FarcasterNetwork::Testnet,
                 message_router,
                 mempool_tx.clone(),
-                Some(Box::new(MockL1Client {})),
+                chain_clients,
                 "0.1.2".to_string(),
                 "asddef".to_string(),
             ),
@@ -384,11 +408,10 @@ mod tests {
         HubEvent::put_event_transaction(&mut txn, &hub_event).unwrap();
         db.commit(txn).unwrap();
 
-        let mut request = Request::new(proto::EventRequest {
+        let request = Request::new(proto::EventRequest {
             id: event_id,
             shard_index: 1,
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_event(request).await.unwrap();
 
         let hub_event_response = response.into_inner();
@@ -404,11 +427,10 @@ mod tests {
 
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
 
-        let mut request = Request::new(proto::EventRequest {
+        let request = Request::new(proto::EventRequest {
             id: 99999, // Junk event ID
             shard_index: 1,
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_event(request).await;
 
         assert!(response.is_err());
@@ -424,11 +446,10 @@ mod tests {
         let event_id = 12345;
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
 
-        let mut request = Request::new(proto::EventRequest {
+        let request = Request::new(proto::EventRequest {
             id: event_id,
             shard_index: 999, // junk shard
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_event(request).await;
 
         // Validate the response
@@ -445,11 +466,10 @@ mod tests {
         let event_id = 12345;
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
 
-        let mut request = Request::new(proto::EventRequest {
+        let request = Request::new(proto::EventRequest {
             id: event_id,
             shard_index: 0,
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_event(request).await;
 
         assert!(response.is_err());
@@ -529,10 +549,7 @@ mod tests {
         // Message with no fid registration
         let invalid_message = messages_factory::casts::create_cast_add(123, "test", None, None);
 
-        let mut request = Request::new(invalid_message);
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
-
-        let response = service.submit_message(request).await.unwrap_err();
+        let response = submit_message(&service, invalid_message).await.unwrap_err();
 
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
         assert_eq!(
@@ -561,9 +578,7 @@ mod tests {
         test_helper::commit_message(&mut engine1, &valid_message).await;
 
         // Submitting a duplicate message should return an error
-        let mut request = Request::new(valid_message);
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
-        let response = service.submit_message(request).await.unwrap_err();
+        let response = submit_message(&service, valid_message).await.unwrap_err();
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
         assert_eq!(
             response.message(),
@@ -734,7 +749,7 @@ mod tests {
 
         let username_proof = UserNameProof {
             timestamp: messages_factory::farcaster_time() as u64,
-            name: "username.eth".to_string().encode_to_vec(),
+            name: b"username.eth".to_vec(),
             owner,
             signature: "signature".to_string().encode_to_vec(),
             fid,
@@ -749,6 +764,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_basename_proof() {
+        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server(None).await;
+        let signer = test_helper::default_signer();
+        let owner = hex::decode("849151d7D0bF1F34b70d5caD5149D28CC2308bf1").unwrap();
+        let fid = SHARD1_FID;
+
+        test_helper::register_user(fid, signer.clone(), owner.clone(), &mut engine1).await;
+
+        let username_proof = UserNameProof {
+            timestamp: messages_factory::farcaster_time() as u64,
+            name: b"username.base.eth".to_vec(),
+            owner,
+            signature: "signature".to_string().encode_to_vec(),
+            fid,
+            r#type: UserNameType::UsernameTypeBasename as i32,
+        };
+
+        let result = service
+            .validate_ens_username_proof(fid, &username_proof)
+            .await;
+        assert!(result.is_ok());
+
+        let user_data_add = messages_factory::user_data::create_user_data_add(
+            fid,
+            UserDataType::Username,
+            &"username.base.eth".to_string(),
+            None,
+            None,
+        );
+
+        // User data add fails because the proof is not committed yet
+        let result = submit_message(&service, user_data_add.clone()).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+
+        let proof_message =
+            messages_factory::username_proof::create_from_proof(&username_proof, None);
+        test_helper::commit_message(&mut engine1, &proof_message).await;
+
+        // Now the user data add should succeed
+        let result = submit_message(&service, user_data_add).await;
+
+        let error = result.unwrap_err();
+        // Ensure that it's not a validation error, if it got as far as adding to the mempool, validation passed
+        // TODO: We should fix the test setup so adding to mempool does not fail
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "unavailable/Error adding to mempool");
+    }
+
+    #[tokio::test]
     async fn test_ens_proof_with_bad_owner() {
         let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server(None).await;
         let signer = test_helper::default_signer();
@@ -759,7 +824,7 @@ mod tests {
 
         let username_proof = UserNameProof {
             timestamp: messages_factory::farcaster_time() as u64,
-            name: "username.eth".to_string().encode_to_vec(),
+            name: b"username.eth".to_vec(),
             owner: "100000000000000000".to_string().encode_to_vec(),
             signature: "signature".to_string().encode_to_vec(),
             fid,
@@ -790,7 +855,7 @@ mod tests {
 
         let username_proof = UserNameProof {
             timestamp: messages_factory::farcaster_time() as u64,
-            name: "username.eth".to_string().encode_to_vec(),
+            name: b"username.eth".to_vec(),
             owner,
             signature: "signature".to_string().encode_to_vec(),
             fid,
@@ -828,7 +893,7 @@ mod tests {
 
         let username_proof = UserNameProof {
             timestamp: messages_factory::farcaster_time() as u64,
-            name: "username.eth".to_string().encode_to_vec(),
+            name: b"username.eth".to_vec(),
             owner: hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
             signature: signature.encode_to_vec(),
             fid,
