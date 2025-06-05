@@ -149,10 +149,6 @@ impl MyHubService {
         service
     }
 
-    fn current_version(&self) -> EngineVersion {
-        EngineVersion::version_for(&FarcasterTime::current(), self.network)
-    }
-
     async fn submit_message_internal(
         &self,
         message: proto::Message,
@@ -1199,9 +1195,17 @@ impl HubService for MyHubService {
         request: Request<Message>,
     ) -> Result<Response<ValidationResponse>, Status> {
         let request = request.into_inner();
-        let result =
-            validations::message::validate_message(&request, self.network, &self.current_version())
-                .map_or_else(|_| false, |_| true);
+        let stores = self.get_stores_for(request.fid())?;
+        let is_pro_user = stores
+            .is_pro_user(request.fid(), &FarcasterTime::current())
+            .map_err(|err| Status::from_error(Box::new(err)))?;
+        let result = validations::message::validate_message(
+            &request,
+            self.network,
+            is_pro_user,
+            EngineVersion::current(self.network),
+        )
+        .map_or_else(|_| false, |_| true);
 
         Ok(Response::new(ValidationResponse {
             valid: result,

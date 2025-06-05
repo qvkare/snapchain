@@ -3,7 +3,7 @@ mod tests {
     use crate::core::util::{
         calculate_message_hash, from_farcaster_time, get_farcaster_time, FarcasterTime,
     };
-    use crate::proto::{self, FarcasterNetwork, ReactionType};
+    use crate::proto::{self, CastId, Embed, FarcasterNetwork, ReactionType};
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
     use crate::proto::{HubEvent, ValidatorMessage};
     use crate::proto::{OnChainEvent, OnChainEventType};
@@ -12,8 +12,8 @@ mod tests {
     use crate::storage::store::engine::{MempoolMessage, ShardEngine};
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
-        self, commit_message_at, commit_messages, default_custody_address, EngineOptions,
-        FID3_FOR_TEST,
+        self, commit_event, commit_event_at, commit_message_at, commit_messages,
+        default_custody_address, key_exists_in_trie, EngineOptions, FID3_FOR_TEST,
     };
     use crate::storage::store::test_helper::{
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
@@ -1930,5 +1930,174 @@ mod tests {
             message_exists_in_trie(&mut engine, &good_signer_cast),
             false
         ); // Revoked
+    }
+
+    #[tokio::test]
+    async fn pro_tier_purchase_is_recorded_only_after_feature_is_active() {
+        let purchase_pro_at_time =
+            async |mut engine: &mut ShardEngine, time_unix_seconds: u64, success: bool| {
+                let time = &FarcasterTime::from_unix_seconds(time_unix_seconds);
+                assert_eq!(
+                    engine
+                        .version_for(time)
+                        .is_enabled(ProtocolFeature::FarcasterPro),
+                    success
+                );
+                let pro_event = events_factory::create_pro_user_event(
+                    FID_FOR_TEST,
+                    1,
+                    Some(time.to_unix_seconds() as u32),
+                );
+                commit_event_at(&mut engine, &pro_event, time).await;
+                assert_eq!(
+                    key_exists_in_trie(&mut engine, &TrieKey::for_onchain_event(&pro_event)),
+                    success
+                );
+                assert_eq!(
+                    engine.get_stores().is_pro_user(FID_FOR_TEST, time).unwrap(),
+                    success
+                );
+            };
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Testnet), // To test pro support
+            messages_request_tx: None,
+            db: None,
+            limits: None,
+        });
+        // Before active
+        purchase_pro_at_time(&mut engine, 1748950000, false).await;
+
+        // After active
+        purchase_pro_at_time(&mut engine, 1748970001, true).await
+    }
+
+    #[tokio::test]
+    async fn pro_users_get_10k_casts() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let pro_event = events_factory::create_pro_user_event(
+            FID_FOR_TEST,
+            1,
+            Some(time::current_timestamp_with_offset(-1)),
+        );
+        let long_cast = messages_factory::casts::create_cast_add_rich(
+            FID_FOR_TEST,
+            &"a".repeat(9999),
+            Some(proto::CastType::TenKCast),
+            vec![],
+            None,
+            None,
+        );
+
+        commit_message_at(&mut engine, &long_cast, &FarcasterTime::current()).await;
+        assert!(
+            !engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&long_cast)),
+        );
+
+        commit_event(&mut engine, &pro_event).await;
+        assert!(engine.trie_key_exists(
+            test_helper::trie_ctx(),
+            &TrieKey::for_onchain_event(&pro_event)
+        ));
+
+        commit_message_at(&mut engine, &long_cast, &FarcasterTime::current()).await;
+        assert!(engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&long_cast)),);
+    }
+
+    #[tokio::test]
+    async fn pro_users_get_four_embeds() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let pro_event = events_factory::create_pro_user_event(
+            FID_FOR_TEST,
+            1,
+            Some(time::current_timestamp_with_offset(-1)),
+        );
+        let four_embeds = messages_factory::casts::create_cast_add_rich(
+            FID_FOR_TEST,
+            "test",
+            Some(proto::CastType::Cast),
+            vec![
+                Embed {
+                    embed: Some(proto::embed::Embed::Url("abcde".to_string())),
+                },
+                Embed {
+                    embed: Some(proto::embed::Embed::Url("fghi".to_string())),
+                },
+                Embed {
+                    embed: Some(proto::embed::Embed::CastId(CastId {
+                        fid: FID_FOR_TEST + 1,
+                        hash: rand::random::<[u8; 20]>().to_vec(),
+                    })),
+                },
+                Embed {
+                    embed: Some(proto::embed::Embed::Url("jklmn".to_string())),
+                },
+            ],
+            None,
+            None,
+        );
+        commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
+        assert!(
+            !engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&four_embeds)),
+        );
+
+        commit_event(&mut engine, &pro_event).await;
+        assert!(engine.trie_key_exists(
+            test_helper::trie_ctx(),
+            &TrieKey::for_onchain_event(&pro_event)
+        ));
+
+        commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
+        assert!(
+            engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&four_embeds)),
+        );
+    }
+
+    #[tokio::test]
+    async fn pro_users_get_banners() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let banner = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Banner,
+            &"image".to_string(),
+            None,
+            None,
+        );
+        let pro_event = events_factory::create_pro_user_event(
+            FID_FOR_TEST,
+            1,
+            Some(time::current_timestamp_with_offset(-1)),
+        );
+        commit_message_at(&mut engine, &banner, &FarcasterTime::current()).await;
+        assert!(!engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&banner)),);
+
+        commit_event(&mut engine, &pro_event).await;
+        assert!(engine.trie_key_exists(
+            test_helper::trie_ctx(),
+            &TrieKey::for_onchain_event(&pro_event)
+        ));
+
+        commit_message_at(&mut engine, &banner, &FarcasterTime::current()).await;
+        assert!(engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&banner)),);
     }
 }

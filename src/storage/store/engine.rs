@@ -297,6 +297,7 @@ impl ShardEngine {
                 txn_batch,
                 ProposalSource::Propose,
                 version,
+                timestamp,
             )?;
             snapchain_txn.account_root = account_root;
             events.extend(txn_events);
@@ -486,6 +487,7 @@ impl ShardEngine {
         shard_root: &[u8],
         source: ProposalSource,
         version: EngineVersion,
+        timestamp: &FarcasterTime,
     ) -> Result<Vec<HubEvent>, EngineError> {
         let now = std::time::Instant::now();
         let mut events = vec![];
@@ -522,6 +524,7 @@ impl ShardEngine {
                 txn_batch,
                 source.clone(),
                 version,
+                timestamp,
             )?;
             // Reject early if account roots fail to match (shard roots will definitely fail)
             if &account_root != &snapchain_txn.account_root {
@@ -566,6 +569,7 @@ impl ShardEngine {
         txn_batch: &mut RocksDbTransactionBatch,
         source: ProposalSource,
         version: EngineVersion,
+        timestamp: &FarcasterTime,
     ) -> Result<(Vec<u8>, Vec<HubEvent>, Vec<MessageValidationError>), EngineError> {
         let now = std::time::Instant::now();
         let total_user_messages = snapchain_txn.user_messages.len();
@@ -586,6 +590,13 @@ impl ShardEngine {
         // System messages first, then user messages and finally prunes
         for msg in &snapchain_txn.system_messages {
             if let Some(onchain_event) = &msg.on_chain_event {
+                if onchain_event.r#type() == OnChainEventType::EventTypeTierPurchase
+                    && !version.is_enabled(ProtocolFeature::FarcasterPro)
+                {
+                    warn!("Saw tier purchase while feature isn't active");
+                    continue;
+                }
+
                 let event = self
                     .stores
                     .onchain_event_store
@@ -721,7 +732,7 @@ impl ShardEngine {
 
         for msg in &snapchain_txn.user_messages {
             // Errors are validated based on the shard root
-            match self.validate_user_message(msg, txn_batch, &version) {
+            match self.validate_user_message(msg, timestamp, version, txn_batch) {
                 Ok(()) => {
                     let result = self.merge_message(msg, txn_batch);
                     match result {
@@ -1048,8 +1059,9 @@ impl ShardEngine {
     pub(crate) fn validate_user_message(
         &self,
         message: &proto::Message,
+        timestamp: &FarcasterTime,
+        version: EngineVersion,
         txn_batch: &mut RocksDbTransactionBatch,
-        version: &EngineVersion,
     ) -> Result<(), MessageValidationError> {
         let now = std::time::Instant::now();
         // Ensure message data is present
@@ -1058,7 +1070,11 @@ impl ShardEngine {
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?;
 
-        validations::message::validate_message(message, self.network, version)?;
+        let is_pro_user = self
+            .stores
+            .is_pro_user(message.fid(), timestamp)
+            .map_err(|err| HubError::internal_db_error(&err.to_string()))?;
+        validations::message::validate_message(message, self.network, is_pro_user, version)?;
 
         // Check that the user has a custody address
         self.stores
@@ -1179,6 +1195,7 @@ impl ShardEngine {
             shard_root,
             ProposalSource::Validate,
             shard_state_change.version,
+            &shard_state_change.timestamp,
         );
 
         match proposal_result {
@@ -1324,6 +1341,7 @@ impl ShardEngine {
                 shard_root,
                 ProposalSource::Commit,
                 version,
+                &FarcasterTime::new(header.timestamp),
             ) {
                 Err(err) => {
                     error!("State change commit failed: {}", err);
@@ -1354,6 +1372,7 @@ impl ShardEngine {
             &mut txn,
             ProposalSource::Simulate,
             version,
+            &FarcasterTime::current(),
         );
 
         match result {
