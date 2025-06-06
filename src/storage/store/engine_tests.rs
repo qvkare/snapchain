@@ -21,6 +21,7 @@ mod tests {
     use crate::storage::trie::merkle_trie::TrieKey;
     use crate::utils::factory::{self, events_factory, messages_factory, time, username_factory};
     use crate::version::version::{EngineVersion, ProtocolFeature};
+    use base64::prelude::*;
     use ed25519_dalek::{Signer, SigningKey};
     use prost::Message;
 
@@ -574,6 +575,347 @@ mod tests {
 
         let verification_result = engine.get_verifications_by_fid(FID_FOR_TEST);
         assert_eq!(0, verification_result.unwrap().messages.len());
+    }
+
+    #[tokio::test]
+    async fn test_validate_ethereum_address_with_verification() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+
+        // Register a user
+        test_helper::register_user(
+            FID3_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // Add Ethereum verification
+        let eth_address = "91031dcfdea024b4d51e775486111d2b2a715871";
+        let verification_add = messages_factory::verifications::create_verification_add(
+            FID3_FOR_TEST,
+            0, // Protocol::Ethereum
+            hex::decode(eth_address).unwrap(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
+            Some(timestamp),
+            None,
+        );
+
+        commit_message(&mut engine, &verification_add).await;
+
+        // Verify the verification was added
+        let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
+        assert_eq!(1, verification_result.unwrap().messages.len());
+
+        // Now validate the Ethereum address verification
+        let eth_address_bytes = hex::decode(eth_address).unwrap();
+        let result = engine.verify_fid_owns_address(
+            FID3_FOR_TEST,
+            proto::Protocol::Ethereum,
+            &eth_address_bytes,
+        );
+        assert!(result.is_ok(), "Ethereum address validation should succeed");
+
+        // Validate with wrong FID should fail
+        let wrong_fid = FID3_FOR_TEST + 1;
+        let wrong_fid_result = engine.verify_fid_owns_address(
+            wrong_fid,
+            proto::Protocol::Ethereum,
+            &eth_address_bytes,
+        );
+        assert!(
+            wrong_fid_result.is_err(),
+            "Validation with wrong FID should fail"
+        );
+        assert_eq!(
+            wrong_fid_result.unwrap_err().to_string(),
+            "address is not part of any verification",
+            "Should fail with correct error message"
+        );
+
+        // Validate with wrong protocol (Solana) should fail
+        let wrong_protocol_result = engine.verify_fid_owns_address(
+            FID3_FOR_TEST,
+            proto::Protocol::Solana,
+            &eth_address_bytes,
+        );
+        assert!(
+            wrong_protocol_result.is_err(),
+            "Validation with wrong protocol should fail"
+        );
+        assert_eq!(
+            wrong_protocol_result.unwrap_err().to_string(),
+            "address is not part of any verification",
+            "Should fail with correct error message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_primary_address_revoked_when_verification_deleted() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            limits: None,
+            db: None,
+            messages_request_tx: None,
+            network: None,
+        });
+
+        // Register a user
+        test_helper::register_user(
+            FID3_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // Test Ethereum primary address revocation
+        let eth_address = "91031dcfdea024b4d51e775486111d2b2a715871";
+        let eth_address_bytes = hex::decode(eth_address).unwrap();
+        // Generate the proper checksummed address
+        let address_instance = alloy_primitives::Address::from_slice(&eth_address_bytes);
+        let eth_address_checksummed = address_instance.to_checksum(None);
+
+        // Step 1: Add Ethereum verification
+        let verification_add = messages_factory::verifications::create_verification_add(
+            FID3_FOR_TEST,
+            0, // Protocol::Ethereum
+            eth_address_bytes.clone(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
+            Some(timestamp),
+            None,
+        );
+        commit_message(&mut engine, &verification_add).await;
+
+        // Step 2: Set the Ethereum address as primary address
+        let primary_address_msg = messages_factory::user_data::create_user_data_add(
+            FID3_FOR_TEST,
+            proto::UserDataType::UserDataPrimaryAddressEthereum,
+            &eth_address_checksummed.to_string(),
+            Some(timestamp + 1),
+            None,
+        );
+        commit_message(&mut engine, &primary_address_msg).await;
+
+        // Verify the primary address was set
+        let user_data_result = engine.get_user_data_by_fid_and_type(
+            FID3_FOR_TEST,
+            proto::UserDataType::UserDataPrimaryAddressEthereum,
+        );
+        assert!(user_data_result.is_ok(), "Primary address should be set");
+        let user_data = user_data_result.unwrap();
+        if let Some(data) = &user_data.data {
+            if let Some(proto::message_data::Body::UserDataBody(body)) = &data.body {
+                assert_eq!(
+                    body.value, eth_address_checksummed,
+                    "Primary address should match"
+                );
+            }
+        }
+
+        // Step 3: Remove the verification (this should also revoke the primary address)
+        let verification_remove = messages_factory::verifications::create_verification_remove(
+            FID3_FOR_TEST,
+            eth_address_bytes.clone(),
+            Some(timestamp + 2),
+            None,
+        );
+        commit_message(&mut engine, &verification_remove).await;
+
+        // Step 4: Verify the primary address was automatically revoked
+        let user_data_result_after = engine.get_user_data_by_fid_and_type(
+            FID3_FOR_TEST,
+            proto::UserDataType::UserDataPrimaryAddressEthereum,
+        );
+        assert!(
+            user_data_result_after.is_err(),
+            "Primary address should be automatically revoked when verification is removed"
+        );
+
+        // Verify the user data message no longer exists in the trie
+        assert!(
+            !test_helper::message_exists_in_trie(&mut engine, &primary_address_msg),
+            "User data message should not exist in trie after revocation"
+        );
+
+        // Verify verifications were actually removed
+        let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
+        assert_eq!(
+            0,
+            verification_result.unwrap().messages.len(),
+            "All verifications should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_primary_address_validation_requires_verification() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            limits: None,
+            db: None,
+            messages_request_tx: None,
+            network: None,
+        });
+
+        // Register a user
+        test_helper::register_user(
+            FID3_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // Try to set a primary address without having a verification for it
+        let eth_address = "1234567890abcdef1234567890abcdef12345678";
+        let eth_address_bytes = hex::decode(eth_address).unwrap();
+        let address_instance = alloy_primitives::Address::from_slice(&eth_address_bytes);
+        let eth_address_checksummed = address_instance.to_checksum(None);
+
+        let primary_address_msg = messages_factory::user_data::create_user_data_add(
+            FID3_FOR_TEST,
+            proto::UserDataType::UserDataPrimaryAddressEthereum,
+            &eth_address_checksummed,
+            Some(timestamp),
+            None,
+        );
+
+        // This should fail validation
+        assert_commit_fails(
+            &mut engine,
+            &primary_address_msg,
+            "bad_request.validation_failure",
+            "address is not part of any verification",
+        )
+        .await;
+
+        // Verify no primary address was set
+        let user_data_result = engine.get_user_data_by_fid_and_type(
+            FID3_FOR_TEST,
+            proto::UserDataType::UserDataPrimaryAddressEthereum,
+        );
+        assert!(
+            user_data_result.is_err(),
+            "Primary address should not be set without verification"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_removing_non_primary_verification_keeps_primary_address() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            limits: None,
+            db: None,
+            messages_request_tx: None,
+            network: None,
+        });
+
+        // Register a user
+        test_helper::register_user(
+            FID3_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // Add 2 verifications
+        let primary_address = "91031dcfdea024b4d51e775486111d2b2a715871";
+        let primary_address_bytes = hex::decode(primary_address).unwrap();
+        let primary_address_instance =
+            alloy_primitives::Address::from_slice(&primary_address_bytes);
+        let primary_address_checksummed = primary_address_instance.to_checksum(None);
+
+        // Add verification for primary address
+        let primary_verification_add = messages_factory::verifications::create_verification_add(
+            FID3_FOR_TEST,
+            0, // Protocol::Ethereum
+            primary_address_bytes.clone(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
+            Some(timestamp),
+            None,
+        );
+        commit_message(&mut engine, &primary_verification_add).await;
+
+        let other_address = "182327170fc284caaa5b1bc3e3878233f529d741";
+        let other_address_bytes = hex::decode(other_address).unwrap();
+
+        // Add verification for other address owned by FID 2
+        let other_verification_add = messages_factory::verifications::create_verification_add(
+            FID3_FOR_TEST,
+            0, // Protocol::Ethereum
+            other_address_bytes.clone(),
+            BASE64_STANDARD.decode("TaU+v+BdZnIJc5CBir69j1taejse9uFgFSUOx3AYH1t7rPH6p8YlAmTbO9poXMRunbGcAmtGibn0DL1wXmIEkhs=").unwrap(),
+            hex::decode("e9ddee7d7fe82a1f326b8c624b9c8031ba7561bf9d92c76067a9d0c01b5ba424").unwrap(),
+            Some(timestamp + 1),
+            None,
+        );
+        commit_message(&mut engine, &other_verification_add).await;
+
+        // Set the primary address
+        let primary_address_msg = messages_factory::user_data::create_user_data_add(
+            FID3_FOR_TEST,
+            proto::UserDataType::UserDataPrimaryAddressEthereum,
+            &primary_address_checksummed,
+            Some(timestamp + 1),
+            None,
+        );
+        commit_message(&mut engine, &primary_address_msg).await;
+
+        // Verify the primary address was set
+        let user_data_result = engine.get_user_data_by_fid_and_type(
+            FID3_FOR_TEST,
+            proto::UserDataType::UserDataPrimaryAddressEthereum,
+        );
+        assert!(user_data_result.is_ok(), "Primary address should be set");
+
+        // Try to remove a verification for the secondary address
+        let other_verification_remove = messages_factory::verifications::create_verification_remove(
+            FID3_FOR_TEST,
+            other_address_bytes.clone(),
+            Some(timestamp + 2),
+            None,
+        );
+
+        // This should succeed
+        commit_message(&mut engine, &other_verification_remove).await;
+
+        // Verify the primary address is STILL set (should not be revoked)
+        let user_data_result_after = engine.get_user_data_by_fid_and_type(
+            FID3_FOR_TEST,
+            proto::UserDataType::UserDataPrimaryAddressEthereum,
+        );
+        assert!(
+            user_data_result_after.is_ok(),
+            "Primary address should still be set when removing non-primary verification"
+        );
+        let user_data_after = user_data_result_after.unwrap();
+        if let Some(data) = &user_data_after.data {
+            if let Some(proto::message_data::Body::UserDataBody(body)) = &data.body {
+                assert_eq!(
+                    body.value, primary_address_checksummed,
+                    "Primary address should still match after attempting to remove other verification"
+                );
+            }
+        }
+
+        // Verify the user data message still exists in the trie
+        assert!(
+            test_helper::message_exists_in_trie(&mut engine, &primary_address_msg),
+            "User data message should still exist in trie when removing non-primary verification"
+        );
+
+        // Verify we still have the original verification
+        let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
+        assert_eq!(
+            1,
+            verification_result.unwrap().messages.len(),
+            "Should still have the original verification"
+        );
     }
 
     #[tokio::test]

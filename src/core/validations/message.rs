@@ -8,6 +8,8 @@ use crate::storage::util::{blake3_20, bytes_compare};
 
 use super::{cast, link, reaction, verification};
 use crate::version::version::{EngineVersion, ProtocolFeature};
+use alloy_primitives::hex::FromHex;
+use alloy_primitives::Address;
 use ed25519_dalek::{Signature, VerifyingKey};
 use fancy_regex::Regex;
 use prost::Message;
@@ -128,7 +130,7 @@ pub fn validate_message(
 
     match &message_data.body {
         Some(proto::message_data::Body::UserDataBody(user_data)) => {
-            validate_user_data_add_body(user_data, is_pro_user)?;
+            validate_user_data_add_body(user_data, is_pro_user, version)?;
         }
         Some(proto::message_data::Body::UsernameProofBody(proof)) => {
             match UserNameType::try_from(proof.r#type) {
@@ -362,6 +364,42 @@ fn validate_longitude(value: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+pub fn validate_user_data_primary_address_ethereum(input: &String) -> Result<(), ValidationError> {
+    // Empty string is allowed for unsetting the primary address
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    if !input.starts_with("0x") || input.len() != 42 {
+        return Err(ValidationError::InvalidDataLength);
+    }
+
+    let parsed = Address::from_hex(input).map_err(|_| ValidationError::InvalidData)?;
+    verification::validate_eth_address(&parsed.to_vec())?;
+
+    // Also check the checksum
+    let checksummed = parsed.to_checksum(None);
+    if checksummed != *input {
+        return Err(ValidationError::InvalidData);
+    }
+    Ok(())
+}
+
+pub fn validate_user_data_primary_address_solana(input: &String) -> Result<(), ValidationError> {
+    // Empty string is allowed for unsetting the primary address
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    // validate the address is base58
+    let decoded = bs58::decode(input)
+        .into_vec()
+        .map_err(|_| ValidationError::InvalidData)?;
+    verification::validate_sol_address(&decoded)?;
+
+    Ok(())
+}
+
 pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
     if location.is_empty() {
         return Ok(());
@@ -394,6 +432,7 @@ pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
 pub fn validate_user_data_add_body(
     body: &UserDataBody,
     is_pro_user: bool,
+    version: EngineVersion,
 ) -> Result<(), ValidationError> {
     let value_bytes = body.value.as_bytes();
 
@@ -446,6 +485,18 @@ pub fn validate_user_data_add_body(
         }
         UserDataType::Github => {
             validate_github_username(&body.value)?;
+        }
+        UserDataType::UserDataPrimaryAddressEthereum => {
+            if !version.is_enabled(ProtocolFeature::PrimaryAddresses) {
+                return Err(ValidationError::UnsupportedFeature);
+            }
+            validate_user_data_primary_address_ethereum(&body.value)?;
+        }
+        UserDataType::UserDataPrimaryAddressSolana => {
+            if !version.is_enabled(ProtocolFeature::PrimaryAddresses) {
+                return Err(ValidationError::UnsupportedFeature);
+            }
+            validate_user_data_primary_address_solana(&body.value)?;
         }
         UserDataType::None => return Err(ValidationError::InvalidData),
     }
