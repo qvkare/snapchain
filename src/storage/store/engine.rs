@@ -171,7 +171,7 @@ struct CachedTransaction {
 
 pub struct ShardEngine {
     shard_id: u32,
-    network: FarcasterNetwork,
+    pub network: FarcasterNetwork,
     pub db: Arc<RocksDB>,
     senders: Senders,
     stores: Stores,
@@ -650,7 +650,7 @@ impl ShardEngine {
                         }
                     }
                     Some(proof) => {
-                        match verification::validate_fname_transfer(fname_transfer) {
+                        match verification::validate_fname_transfer(fname_transfer, self.network) {
                             Ok(_) => {
                                 let event = UserDataStore::merge_username_proof(
                                     &self.stores.user_data_store,

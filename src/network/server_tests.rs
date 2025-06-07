@@ -194,15 +194,11 @@ mod tests {
         let limits = test_helper::limits::test_store_limits();
         let (engine1, _) = test_helper::new_engine_with_options(test_helper::EngineOptions {
             limits: Some(limits.clone()),
-            db: None,
-            messages_request_tx: None,
-            network: None,
+            ..Default::default()
         });
         let (engine2, _) = test_helper::new_engine_with_options(test_helper::EngineOptions {
             limits: Some(limits.clone()),
-            db: None,
-            messages_request_tx: None,
-            network: None,
+            ..Default::default()
         });
         let db1 = engine1.db.clone();
         let db2 = engine2.db.clone();
@@ -243,6 +239,7 @@ mod tests {
         let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(1000);
         let mut mempool = Mempool::new(
             mempool::Config::default(),
+            engine1.network,
             mempool_rx,
             msgs_request_rx,
             num_shards,

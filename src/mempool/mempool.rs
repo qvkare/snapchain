@@ -12,7 +12,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
-use crate::proto::OnChainEventType;
+use crate::proto::{FarcasterNetwork, OnChainEventType};
 use crate::{
     core::types::SnapchainValidatorContext,
     network::gossip::GossipEvent,
@@ -32,6 +32,7 @@ use crate::{
 };
 
 use super::routing::{MessageRouter, ShardRouter};
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use governor::{Quota, RateLimiter};
 use moka::sync::{Cache, CacheBuilder};
 use std::num::NonZeroU32;
@@ -395,11 +396,13 @@ pub struct Mempool {
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
     rate_limits: Option<RateLimits>,
+    network: FarcasterNetwork,
 }
 
 impl Mempool {
     pub fn new(
         config: Config,
+        network: FarcasterNetwork,
         mempool_rx: mpsc::Receiver<MempoolRequest>,
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
@@ -430,6 +433,7 @@ impl Mempool {
                 statsd_client.clone(),
             ),
             statsd_client,
+            network,
         }
     }
 
@@ -499,11 +503,50 @@ impl Mempool {
         source: MempoolSource,
     ) -> Result<(), HubError> {
         let fid = message.fid();
-        let shard_id = self
+        let original_shard_id = self
             .read_node_mempool
             .message_router
             .route_fid(fid, self.read_node_mempool.num_shards);
 
+        let result = self
+            .insert_into_shard(original_shard_id, message.clone(), source.clone())
+            .await;
+
+        // Fname transfers are mirrored to both the sender and receiver shard.
+        if let MempoolMessage::ValidatorMessage(inner_message) = &message {
+            if let Some(_fname_transfer) = &inner_message.fname_transfer {
+                let version = EngineVersion::current(self.network);
+                // Send the username transfer to all other shards, transfers from a->b->c are
+                // correctly tracked. Due to current limitations of the engine, if we transfer from
+                // shard 1 to shard 2, and then transfer within shard 2, we will keep the transfer
+                // around forever on shard 1. See test_fname_transfer for an example.
+                if version.is_enabled(ProtocolFeature::UsernameShardRoutingFix) {
+                    for copy_shard in 1..self.read_node_mempool.num_shards {
+                        if copy_shard != original_shard_id {
+                            let copy_result = self
+                                .insert_into_shard(copy_shard, message.clone(), source.clone())
+                                .await;
+                            if copy_result.is_err() {
+                                warn!(
+                                    "Failed to insert fname transfer into copy shard {}: {:?}",
+                                    copy_shard, copy_result
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    async fn insert_into_shard(
+        &mut self,
+        shard_id: u32,
+        message: MempoolMessage,
+        source: MempoolSource,
+    ) -> Result<(), HubError> {
         match self.messages.get_mut(&shard_id) {
             Some(shard_messages) => {
                 if shard_messages.contains_key(&message.mempool_key()) {
