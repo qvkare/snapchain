@@ -19,10 +19,12 @@ mod tests {
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
     };
     use crate::storage::trie::merkle_trie::TrieKey;
+    use crate::utils::factory::signers::generate_signer;
     use crate::utils::factory::{self, events_factory, messages_factory, time, username_factory};
     use crate::version::version::{EngineVersion, ProtocolFeature};
     use base64::prelude::*;
-    use ed25519_dalek::{Signer, SigningKey};
+    use ed25519_dalek::Signer;
+    use informalsystems_malachitebft_core_types::Round;
     use prost::Message;
 
     fn from_hex(s: &str) -> Vec<u8> {
@@ -1677,8 +1679,8 @@ mod tests {
     #[tokio::test]
     async fn test_revoking_a_signer_deletes_all_messages_from_that_signer() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
-        let signer = SigningKey::generate(&mut rand::rngs::OsRng);
-        let another_signer = &SigningKey::generate(&mut rand::rngs::OsRng);
+        let signer = generate_signer();
+        let another_signer = generate_signer();
         let timestamp = factory::time::farcaster_time();
         let msg1 = messages_factory::casts::create_cast_add(
             FID_FOR_TEST,
@@ -1696,7 +1698,7 @@ mod tests {
             FID_FOR_TEST,
             "msg3",
             None,
-            Some(another_signer),
+            Some(&another_signer),
         );
         let different_fid_same_signer =
             messages_factory::casts::create_cast_add(FID_FOR_TEST + 1, "msg4", None, Some(&signer));
@@ -1951,7 +1953,7 @@ mod tests {
         });
 
         let fid1 = FID_FOR_TEST;
-        let signer = test_helper::generate_signer();
+        let signer = generate_signer();
         let fid2 = FID2_FOR_TEST;
         let timestamp = factory::time::farcaster_time();
         register_user(
@@ -2303,6 +2305,9 @@ mod tests {
         );
         commit_message(&mut engine, &remove_message).await;
 
+        let current_height = engine.get_confirmed_height().increment();
+        engine.start_round(current_height, Round::Nil);
+
         // We can't use assert_commit_fails here, because it checks against existence in the trie, and duplicate will exist already
         let state_change = engine.propose_state_change(
             1,
@@ -2315,6 +2320,12 @@ mod tests {
             &remove_message,
             "bad_request.duplicate",
             "message has already been merged",
+        );
+
+        // We had a bug where all merge failure events were missing event ids
+        assert_eq!(
+            state_change.events[0].id,
+            HubEventIdGenerator::make_event_id_for_block_number(current_height.block_number) + 1 // 0 is reserved for block confirmed
         );
 
         let conflicting_message = messages_factory::casts::create_cast_remove(
@@ -2524,7 +2535,7 @@ mod tests {
         )
         .await;
 
-        let bad_signer = test_helper::generate_signer();
+        let bad_signer = generate_signer();
         // Register a signer
         let signer_event = events_factory::create_signer_event(
             FID_FOR_TEST,
