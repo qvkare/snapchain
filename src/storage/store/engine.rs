@@ -1472,6 +1472,11 @@ impl ShardEngine {
             .block_number;
 
         self.gauge("block_height", *block_number);
+        let block_timestamp = shard_chunk.header.as_ref().unwrap().timestamp;
+        self.gauge(
+            "block_delay_seconds",
+            FarcasterTime::current().to_u64() - block_timestamp,
+        );
 
         let trie_size = self.stores.trie.items()?;
         self.gauge("trie.num_items", trie_size as u64);
@@ -1835,6 +1840,11 @@ impl BlockEngine {
                 .as_ref()
                 .unwrap()
                 .block_number,
+        );
+        let block_timestamp = block.header.as_ref().unwrap().timestamp;
+        self.gauge(
+            "block_delay_seconds",
+            FarcasterTime::current().to_u64() - block_timestamp,
         );
         self.count(
             "block_shards",
