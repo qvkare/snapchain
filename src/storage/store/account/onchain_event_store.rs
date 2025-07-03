@@ -478,10 +478,6 @@ impl OnchainEventStore {
         Ok(onchain_events)
     }
 
-    pub fn is_signer_key(signer_event_body: &SignerEventBody) -> bool {
-        signer_event_body.key_type == SUPPORTED_SIGNER_KEY_TYPE
-    }
-
     pub fn get_signers(
         &self,
         fid: Option<u64>,
@@ -496,7 +492,13 @@ impl OnchainEventStore {
                 None => false,
                 Some(body) => match body {
                     on_chain_event::Body::SignerEventBody(signer_event_body) => {
-                        Self::is_signer_key(signer_event_body)
+                        if let Ok(active_signer) =
+                            self.get_active_signer(onchain_event.fid, signer_event_body.key.clone())
+                        {
+                            active_signer.is_some()
+                        } else {
+                            false
+                        }
                     }
                     _ => false,
                 },
