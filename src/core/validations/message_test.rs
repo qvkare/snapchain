@@ -1,5 +1,5 @@
 mod tests {
-    use crate::core::util::calculate_message_hash;
+    use crate::core::util::{calculate_message_hash, FarcasterTime};
     use crate::core::validations::error::ValidationError;
     use crate::core::validations::message::validate_message;
     use crate::proto::{self, UserNameType};
@@ -20,6 +20,7 @@ mod tests {
             msg,
             FarcasterNetwork::Testnet,
             false,
+            &FarcasterTime::current(),
             EngineVersion::latest(),
         );
         assert!(result.is_err());
@@ -31,6 +32,7 @@ mod tests {
             msg,
             FarcasterNetwork::Testnet,
             false,
+            &FarcasterTime::current(),
             EngineVersion::latest(),
         );
         assert!(result.is_ok());
@@ -46,6 +48,7 @@ mod tests {
             msg,
             FarcasterNetwork::Testnet,
             false,
+            &FarcasterTime::current(),
             EngineVersion::latest(),
         );
         assert!(result.is_ok());
@@ -115,6 +118,7 @@ mod tests {
                 &msg,
                 FarcasterNetwork::Testnet,
                 false,
+                &FarcasterTime::current(),
                 EngineVersion::latest()
             )
             .unwrap_err(),
@@ -128,6 +132,7 @@ mod tests {
                 &msg,
                 FarcasterNetwork::Mainnet,
                 false,
+                &FarcasterTime::current(),
                 EngineVersion::latest()
             )
             .unwrap_err(),
@@ -140,6 +145,7 @@ mod tests {
                 &msg,
                 FarcasterNetwork::Mainnet,
                 false,
+                &FarcasterTime::current(),
                 EngineVersion::latest()
             )
             .unwrap_err(),
@@ -152,6 +158,7 @@ mod tests {
                 &msg,
                 FarcasterNetwork::Mainnet,
                 false,
+                &FarcasterTime::current(),
                 EngineVersion::latest()
             )
             .unwrap_err(),
@@ -224,6 +231,54 @@ mod tests {
         msg.signer = generate_signer().verifying_key().to_bytes().to_vec();
         assert_validation_error(&msg, ValidationError::InvalidSignature);
     }
+    #[test]
+    fn validates_timestamp() {
+        let block_timestamp = &FarcasterTime::current();
+        let msg = messages_factory::casts::create_cast_add(
+            1234,
+            "test",
+            Some(block_timestamp.decr_by(60 * 10).to_u64() as u32),
+            None,
+        );
+        assert_valid(&msg);
+
+        let msg = messages_factory::casts::create_cast_add(
+            1234,
+            "test",
+            Some(block_timestamp.incr_by(60 * 10).to_u64() as u32),
+            None,
+        );
+        assert_valid(&msg);
+
+        let msg = messages_factory::casts::create_cast_add(
+            1234,
+            "test",
+            Some(block_timestamp.incr_by(60 * 11).to_u64() as u32),
+            None,
+        );
+
+        assert_eq!(
+            validate_message(
+                &msg,
+                FarcasterNetwork::Devnet,
+                false,
+                block_timestamp,
+                EngineVersion::V5,
+            ),
+            Ok(())
+        );
+
+        assert_eq!(
+            validate_message(
+                &msg,
+                FarcasterNetwork::Devnet,
+                false,
+                block_timestamp,
+                EngineVersion::latest(),
+            ),
+            Err(ValidationError::TimestampTooFarInFuture)
+        );
+    }
 
     #[test]
     fn validates_username_userdata() {
@@ -263,6 +318,7 @@ mod tests {
                 &msg,
                 FarcasterNetwork::Testnet,
                 false,
+                &FarcasterTime::current(),
                 EngineVersion::latest(),
             );
             assert!(result.is_ok(), "Failed for valid name: {}", name);
@@ -279,6 +335,7 @@ mod tests {
                 &msg,
                 FarcasterNetwork::Testnet,
                 false,
+                &FarcasterTime::current(),
                 EngineVersion::latest(),
             );
             assert!(result.is_err(), "Failed for invalid name: {}", name);
@@ -303,6 +360,7 @@ mod tests {
             &proof_message,
             FarcasterNetwork::Testnet,
             false,
+            &FarcasterTime::current(),
             EngineVersion::latest(),
         );
         assert!(result.is_ok());
@@ -312,6 +370,7 @@ mod tests {
             &proof_message,
             FarcasterNetwork::Testnet,
             false,
+            &FarcasterTime::current(),
             EngineVersion::V4,
         );
         assert!(result.is_err());
@@ -335,6 +394,7 @@ mod tests {
             &proof_message,
             FarcasterNetwork::Testnet,
             false,
+            &FarcasterTime::current(),
             EngineVersion::V4,
         );
         assert!(result.is_ok());
@@ -344,6 +404,7 @@ mod tests {
             &proof_message,
             FarcasterNetwork::Testnet,
             false,
+            &FarcasterTime::current(),
             EngineVersion::latest(),
         );
         assert!(result.is_err());
