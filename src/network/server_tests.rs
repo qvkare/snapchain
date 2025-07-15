@@ -247,7 +247,7 @@ mod tests {
             msgs_request_rx,
             num_shards,
             stores.clone(),
-            gossip_tx,
+            gossip_tx.clone(),
             shard_decision_rx,
             statsd_client.clone(),
         );
@@ -278,6 +278,7 @@ mod tests {
                 proto::FarcasterNetwork::Devnet,
                 message_router,
                 mempool_tx.clone(),
+                gossip_tx.clone(),
                 chain_clients,
                 "0.1.2".to_string(),
                 "asddef".to_string(),
