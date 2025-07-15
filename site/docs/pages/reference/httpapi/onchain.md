@@ -5,10 +5,13 @@
 Get a list of account keys (signers) provided by an FID
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| fid | The FID being requested | `fid=2` |
-| signer | The optional key of signer | `signer=0x0852c07b5695ff94138b025e3f9b4788e06133f04e254f0ea0eb85a06e999cdd` |
+| Parameter | Description                        | Example                                                                     |
+| --------- | ---------------------------------- | --------------------------------------------------------------------------- |
+| fid       | The FID being requested            | `fid=2`                                                                     |
+| signer    | The optional key of signer         | `signer=0x0852c07b5695ff94138b025e3f9b4788e06133f04e254f0ea0eb85a06e999cdd` |
+| pageSize  | Optional page size (default: 1000) | `pageSize=100`                                                              |
+| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...`                                                   |
+| reverse   | Optional reverse order flag        | `reverse=true`                                                              |
 
 **Example**
 
@@ -48,24 +51,29 @@ curl http://127.0.0.1:3381/v1/onChainSignersByFid?fid=6833
 Get a list of account keys provided by an FID
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| fid | The FID being requested | `fid=2` |
-| event_type | The numeric of string value of the event type being requested. This parameter is required | `event_type=1` OR `event_type=EVENT_TYPE_STORAGE_RENT` |
+| Parameter  | Description                                                                    | Example                                                                |
+| ---------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| fid        | The FID being requested                                                        | `fid=2`                                                                |
+| event_type | The string value of the event type being requested. This parameter is required | `event_type=EVENT_TYPE_SIGNER` OR `event_type=EVENT_TYPE_STORAGE_RENT` |
+| pageSize   | Optional page size (default: 1000)                                             | `pageSize=100`                                                         |
+| pageToken  | Optional page token for pagination                                             | `pageToken=DAEDAAAGlQ...`                                              |
+| reverse    | Optional reverse order flag                                                    | `reverse=true`                                                         |
 
 The onChainEventsByFid API will accept the following values for the `event_type` field.
 
-| String                     | Numerical value |
-| -------------------------- | --------------- |
-| EVENT_TYPE_SIGNER          | 1               |
-| EVENT_TYPE_SIGNER_MIGRATED | 2               |
-| EVENT_TYPE_ID_REGISTER     | 3               |
-| EVENT_TYPE_STORAGE_RENT    | 4               |
+| String                     |
+| -------------------------- |
+| EVENT_TYPE_NONE            |
+| EVENT_TYPE_SIGNER          |
+| EVENT_TYPE_SIGNER_MIGRATED |
+| EVENT_TYPE_ID_REGISTER     |
+| EVENT_TYPE_STORAGE_RENT    |
+| EVENT_TYPE_TIER_PURCHASE   |
 
 **Example**
 
 ```bash
-curl http://127.0.0.1:3381/v1/onChainEventsByFid?fid=3&event_type=1
+curl http://127.0.0.1:3381/v1/onChainEventsByFid?fid=3&event_type=EVENT_TYPE_SIGNER
 ```
 
 **Response**
@@ -100,9 +108,9 @@ curl http://127.0.0.1:3381/v1/onChainEventsByFid?fid=3&event_type=1
 Get a list of on chain events for a given Address
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| address | The ETH address being requested | `address=0x74232bf61e994655592747e20bdf6fa9b9476f79` |
+| Parameter | Description                     | Example                                              |
+| --------- | ------------------------------- | ---------------------------------------------------- |
+| address   | The ETH address being requested | `address=0x74232bf61e994655592747e20bdf6fa9b9476f79` |
 
 **Example**
 
@@ -129,5 +137,31 @@ curl http://127.0.0.1:3381/v1/onChainIdRegistryEventByAddress?address=0x74232bf6
     "recoveryAddress": "0x00000000fcd5a8e45785c8a4b9a718c9348e4f18"
   },
   "txIndex": 0
+}
+```
+
+## fidAddressType
+
+Get the address type information for a given FID and address
+
+**Query Parameters**
+| Parameter | Description              | Example                                              |
+| --------- | ------------------------ | ---------------------------------------------------- |
+| fid       | The FID being requested  | `fid=2`                                              |
+| address   | The ETH address to check | `address=0x91031dcfdea024b4d51e775486111d2b2a715871` |
+
+**Example**
+
+```bash
+curl http://127.0.0.1:3381/v1/fidAddressType?fid=2&address=0x91031dcfdea024b4d51e775486111d2b2a715871
+```
+
+**Response**
+
+```json
+{
+  "is_custody": false,
+  "is_auth": false,
+  "is_verified": true
 }
 ```
