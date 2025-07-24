@@ -4,6 +4,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::header::HeaderValue;
 use hyper::{body::Bytes, Method};
 use hyper::{HeaderMap, Request, Response, StatusCode};
+use libp2p::PeerId;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::convert::Infallible;
 use std::future::Future;
@@ -19,12 +20,9 @@ use crate::proto::{
 };
 use crate::proto::{
     casts_by_parent_request, hub_event, link_request, links_by_target_request, on_chain_event,
-    reaction_request, reactions_by_target_request, GetConnectedPeersRequest,
-    GetConnectedPeersResponse, Protocol,
+    reaction_request, reactions_by_target_request, GetConnectedPeersRequest, Protocol,
 };
 use crate::storage::store::account::message_decode;
-
-use super::server::MyHubService;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -1204,6 +1202,53 @@ impl IdRegistryEventByAddressRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContactInfoBody {
+    gossip_address: String,
+    peer_id: String,
+    snapchain_version: String,
+    network: FarcasterNetwork,
+    timestamp: u64,
+}
+
+impl TryFrom<proto::ContactInfoBody> for ContactInfoBody {
+    type Error = ErrorResponse;
+
+    fn try_from(value: proto::ContactInfoBody) -> Result<Self, Self::Error> {
+        Ok(ContactInfoBody {
+            gossip_address: value.gossip_address.clone(),
+            peer_id: PeerId::from_bytes(&value.peer_id)
+                .map_err(|err| ErrorResponse {
+                    error: "Invalid peer id".to_string(),
+                    error_detail: Some(err.to_string()),
+                })?
+                .to_string(),
+            snapchain_version: value.snapchain_version.clone(),
+            network: value.network(),
+            timestamp: value.timestamp,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetConnectedPeersResponse {
+    contacts: Vec<ContactInfoBody>,
+}
+
+impl TryFrom<proto::GetConnectedPeersResponse> for GetConnectedPeersResponse {
+    type Error = ErrorResponse;
+
+    fn try_from(value: proto::GetConnectedPeersResponse) -> Result<Self, Self::Error> {
+        Ok(GetConnectedPeersResponse {
+            contacts: value
+                .contacts
+                .into_iter()
+                .map(ContactInfoBody::try_from)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ValidationResult {
     pub valid: bool,
     pub message: Option<Message>,
@@ -1217,9 +1262,16 @@ pub struct ErrorResponse {
 }
 
 // Implementation struct
-#[derive(Clone)]
-pub struct HubHttpServiceImpl {
-    pub service: Arc<MyHubService>,
+pub struct HubHttpServiceImpl<T: HubService> {
+    pub service: Arc<T>,
+}
+
+impl<T: HubService> Clone for HubHttpServiceImpl<T> {
+    fn clone(&self) -> Self {
+        HubHttpServiceImpl {
+            service: Arc::clone(&self.service),
+        }
+    }
 }
 
 fn map_get_info_response_to_json_info_response(
@@ -2112,7 +2164,10 @@ pub trait HubHttpService {
 }
 
 #[async_trait]
-impl HubHttpService for HubHttpServiceImpl {
+impl<T> HubHttpService for HubHttpServiceImpl<T>
+where
+    T: HubService,
+{
     async fn get_info(&self, _request: InfoRequest) -> Result<InfoResponse, ErrorResponse> {
         let response = self
             .service
@@ -2812,17 +2867,20 @@ impl HubHttpService for HubHttpServiceImpl {
                 error: "Failed to get connected peers".to_string(),
                 error_detail: Some(e.to_string()),
             })?;
-        Ok(response.into_inner())
+        Ok(GetConnectedPeersResponse::try_from(response.into_inner())?)
     }
 }
 
 // Router implementation
-pub struct Router {
-    service: Arc<HubHttpServiceImpl>,
+pub struct Router<Service: HubService> {
+    service: Arc<HubHttpServiceImpl<Service>>,
 }
 
-impl Router {
-    pub fn new(service: HubHttpServiceImpl) -> Self {
+impl<Service> Router<Service>
+where
+    Service: HubService,
+{
+    pub fn new(service: HubHttpServiceImpl<Service>) -> Self {
         Self {
             service: Arc::new(service),
         }
@@ -3050,7 +3108,11 @@ impl Router {
     async fn handle_protobuf_request<Resp, F>(
         &self,
         req: Request<hyper::body::Incoming>,
-        handler: impl FnOnce(Arc<HubHttpServiceImpl>, HeaderMap<HeaderValue>, proto::Message) -> F,
+        handler: impl FnOnce(
+            Arc<HubHttpServiceImpl<Service>>,
+            HeaderMap<HeaderValue>,
+            proto::Message,
+        ) -> F,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible>
     where
         Resp: Serialize,
@@ -3117,7 +3179,7 @@ impl Router {
     async fn handle_request<Req, Resp, F>(
         &self,
         req: Request<hyper::body::Incoming>,
-        handler: impl FnOnce(Arc<HubHttpServiceImpl>, Req) -> F,
+        handler: impl FnOnce(Arc<HubHttpServiceImpl<Service>>, Req) -> F,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible>
     where
         Req: DeserializeOwned,
