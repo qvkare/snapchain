@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+import "blocks.proto";
+
+service ReplicationService {
+  rpc GetReplicationTransactions(GetReplicationTransactionsRequest)
+    returns (GetReplicationTransactionsResponse);
+
+  // IMPORTANT: this is a temporary endpoint for debugging purposes only. It will eventually be
+  // removed, and SHOULD NOT be used for production purposes.
+  rpc GetReplicationTransactionsByFid(GetReplicationTransactionsByFidRequest)
+    returns (GetReplicationTransactionsByFidResponse);
+}
+
+message GetReplicationTransactionsRequest {
+  uint32 shard_id = 1;
+  uint64 block_number = 2;
+  bytes page_token = 3;
+}
+
+message GetReplicationTransactionsResponse {
+  repeated Transaction system_transactions = 1;
+  repeated Transaction user_transactions = 2;
+  bytes next_page_token = 3;
+}
+
+message GetReplicationTransactionsByFidRequest {
+  uint64 fid = 2;
+}
+
+message GetReplicationTransactionsByFidResponse {
+  Transaction system_transaction = 1;
+  Transaction user_transaction = 2;
+}

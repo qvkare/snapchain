@@ -54,6 +54,28 @@ impl Default for PruningConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct ReplicationConfig {
+    pub enable: bool,
+
+    // Note: you shouldn't set these values in the config file, they are
+    // intended to be statically defined across the whole network.
+    pub snapshot_interval: u64, // Specified in number of blocks
+    //
+    #[serde(with = "humantime_serde")]
+    pub snapshot_max_age: Duration,
+}
+
+impl Default for ReplicationConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            snapshot_interval: (60 * 60 * 2), // every ~2 hours (in number of blocks)
+            snapshot_max_age: Duration::from_secs(60 * 60 * 24), // keep snapshots for 24 hours
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     pub log_format: String,
     pub fnames: connectors::fname::Config,
@@ -76,6 +98,7 @@ pub struct Config {
     pub read_node: bool,
     pub pruning: PruningConfig,
     pub http_server: http_server::Config,
+    pub replication: ReplicationConfig,
 }
 
 impl Default for Config {
@@ -102,6 +125,7 @@ impl Default for Config {
             read_node: false,
             pruning: PruningConfig::default(),
             http_server: http_server::Config::default(),
+            replication: ReplicationConfig::default(),
         }
     }
 }

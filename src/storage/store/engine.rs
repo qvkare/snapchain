@@ -156,6 +156,13 @@ impl Senders {
     }
 }
 
+#[derive(Debug)]
+pub struct PostCommitMessage {
+    pub shard_id: u32,
+    pub header: proto::ShardHeader,
+    pub channel: oneshot::Sender<bool>,
+}
+
 struct TransactionCounts {
     transactions: u64,
     user_messages: u64,
@@ -180,6 +187,7 @@ pub struct ShardEngine {
     messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
     pending_txn: Option<CachedTransaction>,
     fname_signer_address: Option<alloy_primitives::Address>,
+    post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
 }
 
 impl ShardEngine {
@@ -193,6 +201,7 @@ impl ShardEngine {
         max_messages_per_block: u32,
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
         fname_signer_address: Option<alloy_primitives::Address>,
+        post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
     ) -> ShardEngine {
         // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
         ShardEngine {
@@ -213,6 +222,7 @@ impl ShardEngine {
             messages_request_tx,
             pending_txn: None,
             fname_signer_address,
+            post_commit_tx,
         }
     }
 
@@ -580,7 +590,7 @@ impl ShardEngine {
         Ok(events)
     }
 
-    fn replay_snapchain_txn(
+    pub(crate) fn replay_snapchain_txn(
         &mut self,
         trie_ctx: &merkle_trie::Context,
         snapchain_txn: &Transaction,
@@ -1418,8 +1428,7 @@ impl ShardEngine {
         }
         counts_by_type
     }
-
-    pub fn commit_and_emit_events(
+    pub async fn commit_and_emit_events(
         &mut self,
         shard_chunk: &ShardChunk,
         mut events: Vec<HubEvent>,
@@ -1465,6 +1474,8 @@ impl ShardEngine {
         }
         let elapsed = now.elapsed();
         self.time_with_shard("commit_time", elapsed.as_millis() as u64);
+        self.post_commit(shard_chunk.header.as_ref().unwrap().clone())
+            .await;
     }
 
     fn emit_commit_metrics(&mut self, shard_chunk: &&ShardChunk) -> Result<(), EngineError> {
@@ -1504,6 +1515,44 @@ impl ShardEngine {
         Ok(())
     }
 
+    async fn post_commit(&mut self, header: proto::ShardHeader) {
+        match &mut self.post_commit_tx {
+            None => return,
+            Some(tx) => {
+                let now = std::time::Instant::now();
+
+                // Attempt to send the post commit message and wait for a response,
+                // but don't block indefinitely in case the receiver is not ready, unavailable,
+                // or too slow.
+
+                let (oneshot_tx, oneshot_rx) = oneshot::channel();
+                let send_future = tx.send(PostCommitMessage {
+                    shard_id: self.shard_id,
+                    header: header,
+                    channel: oneshot_tx,
+                });
+
+                if let Err(err) =
+                    tokio::time::timeout(Duration::from_millis(200), send_future).await
+                {
+                    error!("Post commit hook send failed: {}", err);
+                    return;
+                }
+
+                // Attempt to wait for the receiver to process the message, but don't block
+                // indefinitely in case the receiver is not ready or available.
+                match tokio::time::timeout(Duration::from_millis(200), oneshot_rx).await {
+                    Ok(Ok(_)) => {} // success
+                    Ok(Err(err)) => error!("Post commit hook failed: {}", err),
+                    Err(err) => error!("Post commit hook receive failed: {}", err),
+                }
+
+                let elapsed = now.elapsed();
+                self.time_with_shard("post_commit_time", elapsed.as_millis() as u64);
+            }
+        }
+    }
+
     pub fn make_count_fn(statsd_client: StatsdClientWrapper, shard_id: u32) -> impl Fn(&str, u64) {
         move |key: &str, count: u64| {
             let key = format!("engine.{}", key);
@@ -1511,26 +1560,18 @@ impl ShardEngine {
         }
     }
 
-    pub fn commit_shard_chunk(&mut self, shard_chunk: &ShardChunk) {
+    pub async fn commit_shard_chunk(&mut self, shard_chunk: &ShardChunk) {
         let mut txn = RocksDbTransactionBatch::new();
 
         let shard_root = &shard_chunk.header.as_ref().unwrap().shard_root;
         let transactions = &shard_chunk.transactions;
 
-        let count_fn = Self::make_count_fn(self.statsd_client.clone(), self.shard_id);
-        let count_callback = move |read_count: (u64, u64)| {
-            count_fn("trie.db_get_count.total", read_count.0);
-            count_fn("trie.db_get_count.for_commit", read_count.0);
-            count_fn("trie.mem_get_count.total", read_count.1);
-            count_fn("trie.mem_get_count.for_commit", read_count.1);
-        };
-        let trie_ctx = &merkle_trie::Context::with_callback(count_callback);
-
         let mut applied_cached_txn = false;
         if let Some(cached_txn) = self.pending_txn.clone() {
             if &cached_txn.shard_root == shard_root {
                 applied_cached_txn = true;
-                self.commit_and_emit_events(shard_chunk, cached_txn.events, cached_txn.txn);
+                self.commit_and_emit_events(shard_chunk, cached_txn.events, cached_txn.txn)
+                    .await;
             } else {
                 error!(
                     shard_id = self.shard_id,
@@ -1551,6 +1592,16 @@ impl ShardEngine {
             let block_number = header.height.unwrap().block_number;
             self.stores.event_handler.set_current_height(block_number);
             let version = self.version_for(&FarcasterTime::new(header.timestamp));
+
+            let count_fn = Self::make_count_fn(self.statsd_client.clone(), self.shard_id);
+            let count_callback = move |read_count: (u64, u64)| {
+                count_fn("trie.db_get_count.total", read_count.0);
+                count_fn("trie.db_get_count.for_commit", read_count.0);
+                count_fn("trie.mem_get_count.total", read_count.1);
+                count_fn("trie.mem_get_count.for_commit", read_count.1);
+            };
+            let trie_ctx = &merkle_trie::Context::with_callback(count_callback);
+
             match self.replay_proposal(
                 trie_ctx,
                 &mut txn,
@@ -1565,7 +1616,7 @@ impl ShardEngine {
                     panic!("State change commit failed: {}", err);
                 }
                 Ok(events) => {
-                    self.commit_and_emit_events(shard_chunk, events, txn);
+                    self.commit_and_emit_events(shard_chunk, events, txn).await;
                 }
             }
         }
