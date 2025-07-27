@@ -1,0 +1,125 @@
+name: Documentation Update Check
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  docs-check:
+    if: github.event.issue.pull_request && contains(github.event.comment.body, '/check-docs')
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Get PR information
+        id: pr-info
+        uses: actions/github-script@v7
+        with:
+          result-encoding: string
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            return JSON.stringify({
+              head_sha: pr.data.head.sha,
+              head_ref: pr.data.head.ref,
+              base_sha: pr.data.base.sha
+            });
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ fromJson(steps.pr-info.outputs.result).head_sha }}
+          fetch-depth: 0
+
+      - name: Setup environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          chmod +x scripts/analyze-docs-gemini.sh
+          chmod +x scripts/apply-doc-updates.sh
+
+      - name: Get PR diff and check for API changes
+        id: pr-diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ fromJson(steps.pr-info.outputs.result).base_sha }}
+          HEAD_SHA: ${{ fromJson(steps.pr-info.outputs.result).head_sha }}
+        run: |
+          echo "Analyzing changes between $BASE_SHA and $HEAD_SHA"
+          
+          # Get list of changed files
+          git diff --name-only $BASE_SHA..$HEAD_SHA | grep -E "src/(proto|network|core)" > changed_files.txt || true
+          
+          if [ -s changed_files.txt ]; then
+            echo "API-related files changed:"
+            cat changed_files.txt
+            
+            # Get the actual diff content
+            git diff $BASE_SHA..$HEAD_SHA -- src/proto/ src/network/ src/core/ > pr_diff.txt
+            echo "has_api_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "No API-related changes detected"
+            echo "has_api_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Analyze documentation needs with Gemini 2.5 Flash
+        if: steps.pr-diff.outputs.has_api_changes == 'true'
+        id: gemini-analysis
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          echo "Running documentation analysis..."
+          ./scripts/analyze-docs-gemini.sh "$(cat pr_diff.txt)"
+
+      - name: Apply documentation updates
+        if: steps.pr-diff.outputs.has_api_changes == 'true' && steps.gemini-analysis.outputs.needs_update == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Applying documentation updates..."
+          ./scripts/apply-doc-updates.sh "${{ steps.gemini-analysis.outputs.updates }}"
+          
+          # Configure git
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # Check if there are changes to commit
+          if [ -n "$(git status --porcelain site/docs/)" ]; then
+            git add site/docs/
+            git commit -m "docs: update documentation for API changes"
+            git push origin HEAD
+            echo "Documentation changes committed and pushed"
+          else
+            echo "No documentation changes to commit"
+          fi
+
+      - name: Comment on PR with results
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let message;
+            const hasApiChanges = '${{ steps.pr-diff.outputs.has_api_changes }}' === 'true';
+            const needsUpdate = '${{ steps.gemini-analysis.outputs.needs_update }}' === 'true';
+            
+            if (!hasApiChanges) {
+              message = '✅ No API-related changes detected. Documentation check skipped.';
+            } else if (needsUpdate) {
+              message = '📝 Documentation has been automatically updated and committed to this PR.';
+            } else {
+              message = '✅ No documentation updates needed for these changes.';
+            }
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            }); 

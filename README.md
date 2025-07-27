@@ -127,6 +127,16 @@ You can remove any cached items by running:
 make clean
 ```
 
+## Documentation
+
+Snapchain includes automatic documentation updates for API changes. When making changes to Protocol Buffers, gRPC services, or HTTP endpoints:
+
+1. **Automatic Updates**: Comment `/check-docs` on your PR to trigger automatic documentation analysis and updates
+2. **Manual Check**: Run `make check-docs` to analyze recent changes locally
+3. **Manual Update**: Run `make docs` to check and apply documentation updates
+
+The system uses Google's latest Gemini 2.5 Flash model for intelligent analysis and automatic updates.
+
 ## Publishing
 
 1. Update `package.version` in `Cargo.toml`
