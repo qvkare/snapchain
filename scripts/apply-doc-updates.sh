@@ -52,10 +52,13 @@ apply_file_updates() {
     
     echo "Applying documentation updates..."
     
+    # Write updates to temp file to handle JSON properly
+    echo "$updates" > /tmp/updates.json
+    
     # Process each file update
-    echo "$updates" | jq -r '.updates // {} | to_entries[] | @base64' | while read -r entry; do
+    jq -r '.updates // {} | to_entries[] | @base64' /tmp/updates.json | while read -r entry; do
         local decoded
-        decoded=$(echo "$entry" | base64 -d)
+        decoded=$(echo "$entry" | base64 -d 2>/dev/null || echo "$entry" | base64 --decode 2>/dev/null)
         
         local file_path
         local content
@@ -82,13 +85,16 @@ apply_file_updates() {
         # Verify the file was written correctly
         if [[ -f "$file_path" ]]; then
             local line_count
-            line_count=$(wc -l < "$file_path")
+            line_count=$(wc -l < "$file_path" 2>/dev/null || echo "0")
             echo "  ✓ Written successfully ($line_count lines)"
             files_updated=$((files_updated + 1))
         else
             echo "  ✗ Failed to write file"
         fi
     done
+    
+    # Clean up
+    rm -f /tmp/updates.json
     
     echo "Documentation update complete. Files updated: $files_updated"
 }
