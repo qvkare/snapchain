@@ -100,7 +100,7 @@ jobs:
           if [ -n "$(git status --porcelain site/docs/)" ]; then
             git add site/docs/
             git commit -m "docs: update documentation for API changes"
-            git push origin HEAD
+            git push origin ${{ github.head_ref }}
             echo "Documentation changes committed and pushed"
           else
             echo "No documentation changes to commit"
