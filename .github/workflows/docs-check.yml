@@ -85,7 +85,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Applying documentation updates..."
-          ./scripts/apply-doc-updates.sh "${{ steps.gemini-analysis.outputs.updates }}"
+          # Write updates to file to handle JSON safely
+          cat << 'EOF' > updates.json
+          ${{ steps.gemini-analysis.outputs.updates }}
+          EOF
+          ./scripts/apply-doc-updates.sh "$(cat updates.json)"
+          rm -f updates.json
           
           # Configure git
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
