@@ -141,6 +141,13 @@ message UserDataRequest {
   UserDataType user_data_type = 2;
 }
 
+message UserDataTypeRequest {
+  UserDataType user_data_type = 1;
+  optional uint32 page_size = 2;
+  optional bytes page_token = 3;
+  optional bool reverse = 4;
+}
+
 message OnChainEventRequest {
   uint64 fid = 1;
   OnChainEventType event_type = 2;
