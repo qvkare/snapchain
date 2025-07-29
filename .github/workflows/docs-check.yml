@@ -100,7 +100,11 @@ jobs:
           if [ -n "$(git status --porcelain site/docs/)" ]; then
             git add site/docs/
             git commit -m "docs: update documentation for API changes"
-            git push origin ${{ github.head_ref }}
+            
+            # Get the PR branch name and push
+            BRANCH_NAME="${{ fromJson(steps.pr-info.outputs.result).head_ref }}"
+            echo "Pushing to branch: $BRANCH_NAME"
+            git push origin HEAD:$BRANCH_NAME
             echo "Documentation changes committed and pushed"
           else
             echo "No documentation changes to commit"
